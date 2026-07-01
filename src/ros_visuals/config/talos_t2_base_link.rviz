@@ -1,0 +1,73 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 78
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /TF1
+        - /Marker1
+        - /MarkerArray1
+        - /Wrench1
+      Splitter Ratio: 0.5
+    Tree Height: 0
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: base_link
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Plane: XY
+      Plane Cell Count: 10
+      Cell Size: 1
+      Color: 160; 160; 160
+      Line Style:
+        Value: Lines
+        Line Width: 0.03
+      Reference Frame: <Fixed Frame>
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Enabled: true
+      Alpha: 0.8
+      Show Visual Geometry: true
+      Show Collision Geometry: false
+      General Opacity: 0.8
+      Description Topic: /robot_description
+      Links:
+        All Links Enabled: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Frame Timeout: 15
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Marker Scale: 1
+      Frames:
+        All Enabled: true
+  Enabled: true
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+    - Class: rviz_default_plugins/SetInitialPose
+    - Class: rviz_default_plugins/SetGoal
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 3.5
+      Enable Stereo Rendering: false
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Pitch: 0.35
+      Yaw: 0.785398
+    Saved: ~

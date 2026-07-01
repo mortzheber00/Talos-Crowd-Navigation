@@ -1,0 +1,17 @@
+# Build- und Installationsordner (ROS-spezifisch)
+build/
+install/
+log/
+
+# Python-Artefakte
+__pycache__/
+*.pyc
+
+# Lokale VS Code Einstellungen (optional, je nach Vorliebe)
+.vscode/cmake-variants.json
+.vscode/ipch/
+
+# Große Logdaten oder Bag-Files (wichtig für Robotik!)
+*.bag
+*.mcap
+*.log

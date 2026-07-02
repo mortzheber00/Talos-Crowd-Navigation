@@ -174,6 +174,14 @@ def main():
     c, c_dot, c_ddot = interpolator.comState()
     tw.setComRefState(c, c_dot, c_ddot)
 
+
+    # com reference endpoints for the pre-walk lateral sway: from the spawn CoM
+    # (centred, tall) to over the first support foot at the walking height
+    com_start = robot.stack.comState().value().copy()
+    c, c_dot, c_ddot = interpolator.comState()
+    com_target = c.copy()
+    robot.stack.setComRefState(com_start)
+    
     ############################################################################
     # logging & timing setup
     ############################################################################
@@ -234,7 +242,7 @@ def main():
 
     try:
         for i in range(-N_pre, N_sim):
-            t = simulator.simTime()
+            t = i * dt_sim
             dt = dt_sim
 
             ########################################################################
@@ -320,6 +328,14 @@ def main():
             ########################################################################
             # in every iteration when walking
             ########################################################################
+            
+            if i < 0: 
+                # smooth pre-walk movements to get into position 
+                s = (i + N_pre) / N_pre
+                s = 0.5 - 0.5 * np.cos(np.pi * s)
+                robot.stack.setComRefState((1.0 - s) * com_start + s * com_target)
+
+            
             if i >= 0:
                 # 1. Update foot trajectory
                 T_ref, V_ref, A_ref = foot_trajectory.evaluate(t_step_elapsed)

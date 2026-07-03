@@ -32,7 +32,8 @@ class Robot(Body):
                  baseQuationerion=np.array([0,0,0,1]), 
                  q=None, 
                  useFixedBase=True, 
-                 verbose=True):
+                 verbose=True,
+                 baseFrameName=None):
 
         super().__init__(
                  simulator,
@@ -40,7 +41,16 @@ class Robot(Body):
                  position=basePosition,
                  orientation=baseQuationerion,
                  use_fixed_base=useFixedBase,
-                 flags=pb.URDF_USE_INERTIA_FROM_FILE) # +pb.URDF_MERGE_FIXED_LINKS <-- changes the dynamics quite a lot!
+                 flags=pb.URDF_USE_INERTIA_FROM_FILE
+                 #+pb.JOINT_FEEDBACK_IN_WORLD_SPACE
+                 #+pb.URDF_MERGE_FIXED_LINKS
+                 )
+        
+        # the base frame that is used as base transformation for rbdyn
+        if baseFrameName:
+            self._base_frame_link_id = self.linkNameIndexMap()[baseFrameName]
+        else:
+            self._base_frame_link_id = -1
 
         # print information
         if verbose:
@@ -129,9 +139,6 @@ class Robot(Body):
             print("************************************************************")
             print('q_end', self._q)
 
-    def model(self):
-        return self._model
-
     #---------------------------------------------------------------------------
     # update
     #---------------------------------------------------------------------------
@@ -159,7 +166,7 @@ class Robot(Body):
         '''
 
         # transform to pybullet
-        self._q_cmd[self._q_map_pin_pb] = q
+        self._q_cmd[self._q_map_pin_pb] = 0*q
         self._v_cmd[self._v_map_pin_pb] = v
 
         if q is None:
@@ -238,6 +245,11 @@ class Robot(Body):
             self._sim.jointPositionControl(self.id(), self.actuatedJointIndexes(), self._q_cmd[self._pos_idx_offset:], self._v_cmd[self._vel_idx_offset:])
         else:
             self._sim.jointPositionControl(self.id(), self.actuatedJointIndexes(), self._q_cmd[self._pos_idx_offset:])
+            
+        # if v is not None:
+        #     self._sim.jointPositionControl(self.id(), self.actuatedJointIndexes(), self._q_cmd, self._v_cmd)
+        # else:
+        #     self._sim.jointPositionControl(self.id(), self.actuatedJointIndexes(), self._q_cmd)
 
     def setActuatedJointTorques(self, tau):
         '''
@@ -291,7 +303,7 @@ class Robot(Body):
         x_com_w, Q_com_w = self.baseCoMPose()
 
         # floating base q = [x_b_w, Q_b_w, q_0,...,q_n]
-        # note: to get the base frame position we need do take the offset
+        # note: to get the base frame position we need to take the offset
         # between the base com and the base_link into account
         # Simon: really strange...
         base_state = pb.getDynamicsInfo(self._id, -1)
@@ -328,16 +340,16 @@ class Robot(Body):
 
     def q(self):
         '''
-        current position for pinocchio: q = [floating base, joint position]
+        current position for pinocchio
         '''
         return self._q
 
     def v(self):
         '''
-        current velocites for pinocchio:  v = [floating base vel, joint vel]
+        current velocites for pinocchio
         '''
         return self._v
-    
+
     def computeBulletPinoccioMaps(self, model):
         '''
         find the state mappings between pybullet and pinoochio

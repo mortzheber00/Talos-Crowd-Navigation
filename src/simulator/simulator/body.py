@@ -3,9 +3,10 @@ Pybullet body base class
 Author: Simon Armleder
 """
 
-import pybullet as pb
 import numpy as np
 import os
+
+from simulator import mujoco_wrapper as mjw
 
 class Color:
     red = [1,0,0]
@@ -59,7 +60,7 @@ class Body:
         return self._id
 
     def numJoints(self):
-        return pb.getNumJoints(self._id)
+        return self._sim.getNumJoints(self._id)
 
     def numActuatedJoints(self):
         return len(self._actuated_joint_indexes)
@@ -77,10 +78,10 @@ class Body:
         return totalMass
 
     def baseName(self):
-        return pb.getBodyInfo(self._id)[0].decode()
+        return self._sim.getBodyInfo(self._id)[0].decode()
 
     def name(self):
-        return pb.getBodyInfo(self._id)[1].decode()
+        return self._sim.getBodyInfo(self._id)[1].decode()
 
     def jointIndex(self, jointName):
         return self.jointNameIndexMap()[jointName]
@@ -89,7 +90,7 @@ class Body:
         return list(range(self.numJoints()))
 
     def jointName(self, jointIndex):
-        return pb.getJointInfo(self._id, jointIndex)[1].decode()
+        return self._sim.getJointInfo(self._id, jointIndex)[1].decode()
 
     def jointNames(self):
         try:
@@ -108,7 +109,7 @@ class Body:
         return list(range(self.numJoints()))
 
     def linkName(self, linkIndex):
-        return pb.getJointInfo(self._id, linkIndex)[12].decode()
+        return self._sim.getJointInfo(self._id, linkIndex)[12].decode()
 
     def linkNames(self):
         try:
@@ -121,10 +122,10 @@ class Body:
             return self._link_names
 
     def jointType(self, jointIndex):
-        return pb.getJointInfo(self._id, jointIndex)[2]
+        return self._sim.getJointInfo(self._id, jointIndex)[2]
 
     def jointDamping(self, jointIndex):
-        return pb.getJointInfo(self._id, jointIndex)[6]
+        return self._sim.getJointInfo(self._id, jointIndex)[6]
 
     def jointDampings(self):
         joint_dampings = []
@@ -133,7 +134,7 @@ class Body:
         return joint_dampings
 
     def jointFriction(self, jointIndex):
-        return pb.getJointInfo(self._id, jointIndex)[7]
+        return self._sim.getJointInfo(self._id, jointIndex)[7]
 
     def jointFrictions(self):
         joint_frictions = []
@@ -142,7 +143,7 @@ class Body:
         return joint_frictions
 
     def jointLowerLimit(self, jointIndex):
-        return pb.getJointInfo(self._id, jointIndex)[8]
+        return self._sim.getJointInfo(self._id, jointIndex)[8]
 
     def actuatedJointLowerLimits(self):
         try:
@@ -152,7 +153,7 @@ class Body:
             return self._actuated_joint_lower_limits
 
     def jointUpperLimit(self, jointIndex):
-        return pb.getJointInfo(self._id, jointIndex)[9]
+        return self._sim.getJointInfo(self._id, jointIndex)[9]
 
     def actuatedJointUpperLimits(self):
         try:
@@ -162,10 +163,10 @@ class Body:
             return self._actuated_joint_upper_limits
 
     def jointMaxForce(self, jointIndex):
-        return pb.getJointInfo(self._id, jointIndex)[10]
+        return self._sim.getJointInfo(self._id, jointIndex)[10]
 
     def jointMaxVelocity(self, jointIndex):
-        return pb.getJointInfo(self._id, jointIndex)[11]
+        return self._sim.getJointInfo(self._id, jointIndex)[11]
 
     def jointIndexNameMap(self):
         try:
@@ -206,7 +207,7 @@ class Body:
     def numActuatedJoints(self):
         n = 0
         for i in range(self.numJoints()):
-            if self.jointType(i) is not pb.JOINT_FIXED:
+            if self.jointType(i) is not mjw.JOINT_FIXED:
                 n += 1
         return n
 
@@ -216,7 +217,7 @@ class Body:
         except AttributeError:
             self._actuated_joint_names = []
             for i in range(self.numJoints()):
-                if self.jointType(i) is not pb.JOINT_FIXED:
+                if self.jointType(i) is not mjw.JOINT_FIXED:
                     self._actuated_joint_names.append(self.jointName(i))
             return self._actuated_joint_names
 
@@ -230,16 +231,16 @@ class Body:
             return self._actuated_joint_indexes
 
     def linkMass(self, link_id):
-        return pb.getDynamicsInfo(self._id, link_id)[0]
+        return self._sim.getDynamicsInfo(self._id, link_id)[0]
 
     def linkLocalInertialTransform(self, link_id):
-        return pb.getDynamicsInfo(self._id, link_id)[3:5]
+        return self._sim.getDynamicsInfo(self._id, link_id)[3:5]
 
     def linkLocalInertialPosition(self, link_id):
-        return np.array(pb.getDynamicsInfo(self._id, link_id)[3])
+        return np.array(self._sim.getDynamicsInfo(self._id, link_id)[3])
 
     def linkLocalInertiaQuaternion(self, link_id):
-        return np.array(pb.getDynamicsInfo(self._id, link_id)[4])
+        return np.array(self._sim.getDynamicsInfo(self._id, link_id)[4])
 
     #---------------------------------------------------------------------------
     # get link states
@@ -320,10 +321,10 @@ class Body:
     # debug functions
     #---------------------------------------------------------------------------
 
-    def applyForce(self, f_w, p_w=[0, 0, 0], frame=pb.LINK_FRAME):
+    def applyForce(self, f_w, p_w=[0, 0, 0], frame=mjw.LINK_FRAME):
         f = np.linalg.norm(np.array(f_w))
         if(f > 0):
-            pb.applyExternalForce(self._id, -1, f_w, p_w, frame)
+            self._sim.applyExternalForce(self._id, -1, f_w, p_w, frame)
 
     def addDebugLinkFrames(self, axisLength=0.1, axisWidth=1):
         for linkId in range(-1, self.numJoints()):
@@ -335,22 +336,22 @@ class Body:
 
     def addDebugLinkFrame(self, linkId, axisLength=0.2, axisWidth=1):
         localTransCom = self.linkLocalInertialTransform(linkId)
-        comPosLocal, comQuatLocal = pb.invertTransform(localTransCom[0], localTransCom[1])
-        comRotLocal = np.array(pb.getMatrixFromQuaternion(comQuatLocal)).reshape((3,3))
-        pb.addUserDebugLine(comPosLocal, comPosLocal+comRotLocal[:,0] * axisLength, Color.red, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
-        pb.addUserDebugLine(comPosLocal, comPosLocal+comRotLocal[:,1] * axisLength, Color.green, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
-        pb.addUserDebugLine(comPosLocal, comPosLocal+comRotLocal[:,2] * axisLength, Color.blue, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
+        comPosLocal, comQuatLocal = mjw.invertTransform(localTransCom[0], localTransCom[1])
+        comRotLocal = np.array(mjw.getMatrixFromQuaternion(comQuatLocal)).reshape((3,3))
+        self._sim.addUserDebugLine(comPosLocal, comPosLocal+comRotLocal[:,0] * axisLength, Color.red, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
+        self._sim.addUserDebugLine(comPosLocal, comPosLocal+comRotLocal[:,1] * axisLength, Color.green, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
+        self._sim.addUserDebugLine(comPosLocal, comPosLocal+comRotLocal[:,2] * axisLength, Color.blue, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
 
     def addDebugLinkInertiaFrame(self, linkId, axisLength=0.2, axisWidth=1):
         position, quaternion = [0, 0, 0], [0, 0, 0, 1]
-        rotation = np.array(pb.getMatrixFromQuaternion(quaternion)).reshape((3, 3))
-        pb.addUserDebugLine(position, position+rotation[:,0] * axisLength, Color.red, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
-        pb.addUserDebugLine(position, position+rotation[:,1] * axisLength, Color.green, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
-        pb.addUserDebugLine(position, position+rotation[:,2] * axisLength, Color.blue, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
+        rotation = np.array(mjw.getMatrixFromQuaternion(quaternion)).reshape((3, 3))
+        self._sim.addUserDebugLine(position, position+rotation[:,0] * axisLength, Color.red, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
+        self._sim.addUserDebugLine(position, position+rotation[:,1] * axisLength, Color.green, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
+        self._sim.addUserDebugLine(position, position+rotation[:,2] * axisLength, Color.blue, lineWidth=axisWidth, parentObjectUniqueId=self._id, parentLinkIndex=linkId)
 
     def addDebugFrame(self, position, quaternion, axisLength=0.2, axisWidth=1):
         position, quaternion = [0, 0, 0], [0, 0, 0, 1]
-        rotation = np.array(pb.getMatrixFromQuaternion(quaternion)).reshape((3, 3))
-        pb.addUserDebugLine(position, position + rotation[:, 0] * axisLength, Color.red, lineWidth=axisWidth)
-        pb.addUserDebugLine(position, position + rotation[:, 1] * axisLength, Color.green, lineWidth=axisWidth)
-        pb.addUserDebugLine(position, position + rotation[:, 2] * axisLength, Color.blue, lineWidth=axisWidth)
+        rotation = np.array(mjw.getMatrixFromQuaternion(quaternion)).reshape((3, 3))
+        self._sim.addUserDebugLine(position, position + rotation[:, 0] * axisLength, Color.red, lineWidth=axisWidth)
+        self._sim.addUserDebugLine(position, position + rotation[:, 1] * axisLength, Color.green, lineWidth=axisWidth)
+        self._sim.addUserDebugLine(position, position + rotation[:, 2] * axisLength, Color.blue, lineWidth=axisWidth)

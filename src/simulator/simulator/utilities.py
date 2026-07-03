@@ -3,10 +3,18 @@ Robot base class (connection pybullet & pinocchio)
 Author: Simon Armleder
 """
 import numpy as np
-import pybullet as pb
 
 import eigenpy as ei
 import pinocchio as pin
+
+# geometry helpers are engine independent and live in the MuJoCo wrapper now
+from simulator.mujoco_wrapper import (
+    getMatrixFromQuaternion as _getMatrixFromQuaternion,
+    getEulerFromQuaternion as _getEulerFromQuaternion,
+    getQuaternionFromEuler as _getQuaternionFromEuler,
+    invertTransform as _invertTransform,
+    multiplyTransforms as _multiplyTransforms,
+)
 
 from matplotlib.patches import Ellipse
 import matplotlib.transforms as transforms
@@ -19,7 +27,7 @@ def quaternionToMatrix(Q):
     '''
     Quaternion [x,y,z,w] numpy array to rotation matrix
     '''
-    return np.array(pb.getMatrixFromQuaternion(Q)).reshape((3, 3))
+    return np.array(_getMatrixFromQuaternion(Q)).reshape((3, 3))
 
 def matrixToQuaternion(R):
     '''
@@ -32,33 +40,33 @@ def quaternionToEuler(Q):
     '''
     Quaternion to euler numpy array [x,y,z]
     '''
-    return np.array(pb.getEulerFromQuaternion(Q))
+    return np.array(_getEulerFromQuaternion(Q))
 
 def eulerToQuaternion(eul):
     '''
     Euler [x,y,z] to quaternion numpy array
     '''
-    return np.array(pb.getQuaternionFromEuler(eul))
+    return np.array(_getQuaternionFromEuler(eul))
 
 def inverseTransform(t_A_B, Q_A_B):
     '''
     get the inverse transformation
     '''
-    t_B_A, Q_B_A = pb.invertTransform(t_A_B, Q_A_B)
+    t_B_A, Q_B_A = _invertTransform(t_A_B, Q_A_B)
     return np.array(t_B_A), np.array(Q_B_A)
 
 def transformPoint(t_A_B, Q_A_B, p_A):
     '''
     Transforms point frame A into frame B
     '''    
-    p_B, Q = pb.multiplyTransforms(t_A_B, Q_A_B, p_A, [0,0,0,1])
+    p_B, Q = _multiplyTransforms(t_A_B, Q_A_B, p_A, [0,0,0,1])
     return np.array(p_B)
 
 def transformFrame(t_A_B, Q_A_B, p_A, Q_A):
     '''
     Transforms frame A into frame B
     '''    
-    p_B, Q_B = pb.multiplyTransforms(t_A_B, Q_A_B, p_A, Q_A)
+    p_B, Q_B = _multiplyTransforms(t_A_B, Q_A_B, p_A, Q_A)
     return np.array(p_B), np.array(Q_B)
 
 def motionVecRotation(R):

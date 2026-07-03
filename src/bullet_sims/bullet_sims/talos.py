@@ -1,6 +1,5 @@
 import numpy as np
 import pinocchio as pin
-import pybullet as pb
 
 # simulator
 #>>>>TODO: Fix include
@@ -76,8 +75,8 @@ class Talos(Robot):
         # ft sensors
         #>>>>TODO: Turn on the force torque sensor in the robots feet
             # activate ankle-Torque Sensors in PyBullet Sim
-        pb.enableJointForceTorqueSensor(self.robot.id(), self.robot.jointNameIndexMap()['leg_right_6_joint'], True)
-        pb.enableJointForceTorqueSensor(self.robot.id(), self.robot.jointNameIndexMap()['leg_left_6_joint'], True)
+        self.sim.enableJointForceTorqueSensor(self.robot.id(), self.robot.jointNameIndexMap()['leg_right_6_joint'], True)
+        self.sim.enableJointForceTorqueSensor(self.robot.id(), self.robot.jointNameIndexMap()['leg_left_6_joint'], True)
 
         self.enable_ankle_strategy = True
         self.enable_hip_strategy = True
@@ -240,7 +239,7 @@ class Talos(Robot):
         
         # Rechter Fuß
         try:
-            state_RF = pb.getJointState(self.robot.id(), self.robot.jointNameIndexMap()['leg_right_6_joint'], physicsClientId=client_id)
+            state_RF = self.sim.getJointState(self.robot.id(), self.robot.jointNameIndexMap()['leg_right_6_joint'], physicsClientId=client_id)
             wrench_rf = WrenchStamped()
             wrench_rf.header.stamp = stamp
             wrench_rf.header.frame_id = 'leg_right_6_link'
@@ -253,7 +252,7 @@ class Talos(Robot):
         
         # Linker Fuß
         try:
-            state_LF = pb.getJointState(self.robot.id(), self.robot.jointNameIndexMap()['leg_left_6_joint'], physicsClientId=client_id)
+            state_LF = self.sim.getJointState(self.robot.id(), self.robot.jointNameIndexMap()['leg_left_6_joint'], physicsClientId=client_id)
             wrench_lf = WrenchStamped()
             wrench_lf.header.stamp = stamp
             wrench_lf.header.frame_id = 'leg_left_6_link'
@@ -398,12 +397,11 @@ class Talos(Robot):
     def _update_zmp_estimate(self):
         """update the estimated zmp position
         """
-        import pybullet as pb
         client_id = getattr(self.sim, 'physicsClientId', 0)
         
         # Gelenk-Zustände auslesen
-        state_RF = pb.getJointState(self.robot.id(), self.robot.jointNameIndexMap()['leg_right_6_joint'], physicsClientId=client_id)
-        state_LF = pb.getJointState(self.robot.id(), self.robot.jointNameIndexMap()['leg_left_6_joint'], physicsClientId=client_id)
+        state_RF = self.sim.getJointState(self.robot.id(), self.robot.jointNameIndexMap()['leg_right_6_joint'], physicsClientId=client_id)
+        state_LF = self.sim.getJointState(self.robot.id(), self.robot.jointNameIndexMap()['leg_left_6_joint'], physicsClientId=client_id)
         
         ft_RF = np.array(state_RF[2])
         ft_LF = np.array(state_LF[2])
@@ -471,7 +469,7 @@ class Talos(Robot):
         self.dcm = com_pos + (com_vel / omega_0)
 
 def run_test():
-    from simulator.pybullet_wrapper import PybulletWrapper
+    from simulator.mujoco_wrapper import MujocoWrapper as PybulletWrapper
     from footstep_planner import Side
     from talos import Talos
 

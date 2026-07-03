@@ -4,7 +4,6 @@ talos walking simulation
 
 import numpy as np
 import pinocchio as pin
-import pybullet as pb
 import matplotlib.pyplot as plt
 from enum import Enum
 
@@ -12,7 +11,7 @@ from enum import Enum
 # simulator
 #>>>>TODO: Fix include
 from simulator.robot import Robot
-from simulator.pybullet_wrapper import PybulletWrapper
+from simulator.mujoco_wrapper import MujocoWrapper as PybulletWrapper
 
 # whole-body controller
 #>>>>TODO: Fix include
@@ -51,7 +50,7 @@ def _foot_joint_name(side):
 
 
 def _read_foot_force_z(robot, side, client_id):
-    state = pb.getJointState(
+    state = robot._sim.getJointState(
         robot.id(),
         robot.jointNameIndexMap()[_foot_joint_name(side)],
         physicsClientId=client_id,
@@ -160,8 +159,8 @@ def main():
     zmp_steps = [planner.initial_support] + steps
     ZMP_ref = generate_zmp_reference(zmp_steps, tsid_conf.no_mpc_samples_per_step)
     
-    # Plot the plan in PyBullet GUI zur visuellen Kontrolle
-    planner.plot(pb)
+    # Plot the plan in the simulator GUI zur visuellen Kontrolle
+    planner.plot(simulator)
     
     # Setup the mpc & interpolator aus lip_mpc.py
     mpc = LIPMPC(tsid_conf)

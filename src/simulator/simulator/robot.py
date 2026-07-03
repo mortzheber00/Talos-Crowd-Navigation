@@ -4,9 +4,9 @@ Author: Simon Armleder
 """
 
 import numpy as np
-import pybullet as pb
 import pinocchio as pin
 
+from simulator import mujoco_wrapper as mjw
 from simulator.body import Body
 import simulator.utilities as sim_utils
 
@@ -40,7 +40,7 @@ class Robot(Body):
                  position=basePosition,
                  orientation=baseQuationerion,
                  use_fixed_base=useFixedBase,
-                 flags=pb.URDF_USE_INERTIA_FROM_FILE) # +pb.URDF_MERGE_FIXED_LINKS <-- changes the dynamics quite a lot!
+                 flags=mjw.URDF_USE_INERTIA_FROM_FILE) # +mjw.URDF_MERGE_FIXED_LINKS <-- changes the dynamics quite a lot!
 
         # print information
         if verbose:
@@ -294,9 +294,9 @@ class Robot(Body):
         # note: to get the base frame position we need do take the offset
         # between the base com and the base_link into account
         # Simon: really strange...
-        base_state = pb.getDynamicsInfo(self._id, -1)
-        x_b_com, Q_b_com = pb.invertTransform(base_state[3], base_state[4])
-        x_b_w, Q_b_w = pb.multiplyTransforms(x_com_w, Q_com_w, x_b_com, Q_b_com)  
+        base_state = self._sim.getDynamicsInfo(self._id, -1)
+        x_b_com, Q_b_com = mjw.invertTransform(base_state[3], base_state[4])
+        x_b_w, Q_b_w = mjw.multiplyTransforms(x_com_w, Q_com_w, x_b_com, Q_b_com)
         return np.array(x_b_w), np.array(Q_b_w)
 
     def updateState(self):
@@ -316,7 +316,7 @@ class Robot(Body):
             q = np.concatenate((x_b_w, Q_b_w, q))
 
             # Note: the floating base velocity is expressed in the base frame, not in world!
-            R_b_w = np.array(pb.getMatrixFromQuaternion(Q_b_w)).reshape((3, 3))
+            R_b_w = np.array(mjw.getMatrixFromQuaternion(Q_b_w)).reshape((3, 3))
 
             # floating base qP = [xP, omega, qP_0, ..., qP_n]
             XP_com_w = self.baseWorldVelocity()

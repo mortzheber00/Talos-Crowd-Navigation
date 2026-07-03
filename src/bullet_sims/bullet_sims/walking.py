@@ -41,7 +41,7 @@ def main():
     conf.dt  = 1.0/frequency
     conf.no_sim_per_mpc = int(round(conf.dt_mpc / conf.dt))
     conf.no_sim_per_step = int(round(conf.step_dur / conf.dt))
-    simulator = PybulletWrapper(sim_rate=frequency, num_sub_steps=8, render=True)
+    simulator = PybulletWrapper(sim_rate=frequency, num_solver_iterations=50, num_sub_steps=8, render=True)
 
     # Instanziierung des TSID Wrappers
     try:

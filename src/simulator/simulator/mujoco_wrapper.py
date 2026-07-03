@@ -155,6 +155,9 @@ class Floor:
 class MujocoWrapper:
     """MuJoCo-backed re-implementation of :class:`PybulletWrapper`."""
 
+    _POS_KP = 2000.0   # position-servo stiffness (used for the homing controller)
+    _POS_KV = 100.0    # position-servo damping
+
     def __init__(self,
                  render=True,
                  sim_rate=1000,
@@ -172,7 +175,9 @@ class MujocoWrapper:
         self._sim_time = 0.0
         self._start_time = time.time()
         self._time_warp = 1.0
-        self._floor_friction = [1.0, 0.005, 0.0001]
+        # High tangential friction so the feet do not slip under the rigid-contact
+        # forces a TSID-style inverse-dynamics controller assumes.
+        self._floor_friction = [2.0, 0.05, 0.001]
 
         # model building state
         self._spec = mujoco.MjSpec()
@@ -181,12 +186,25 @@ class MujocoWrapper:
         if num_solver_iterations is not None:
             self._spec.option.iterations = int(num_solver_iterations)
 
-        # ground plane
-        self._spec.worldbody.add_geom(
+        # Contact model tuned for legged inverse-dynamics control:
+        #  * impratio raises the friction/normal constraint stiffness ratio, the
+        #    single biggest lever against feet sliding under ID torques.
+        #  * elliptic friction cone + Newton solver is the accurate/stable combo.
+        self._spec.option.impratio = 30.0
+        self._spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+        self._spec.option.solver = mujoco.mjtSolver.mjSOL_NEWTON
+        self._spec.option.iterations = max(getattr(self._spec.option, "iterations", 0), 100)
+
+        # ground plane -- stiff, minimally compliant contact (approx. rigid)
+        floor = self._spec.worldbody.add_geom(
             name="floor",
             type=mujoco.mjtGeom.mjGEOM_PLANE,
             size=[0, 0, 0.05],
             friction=self._floor_friction)
+        floor.solref = [0.005, 1.0]           # 5 ms time constant -> stiff
+        floor.solimp = [0.95, 0.99, 0.001, 0.5, 2.0]
+        floor.contype = 1                     # collision groups: see createBodyFromUrdf
+        floor.conaffinity = 2
 
         self._bodies = {}          # body_id -> _BodyRecord
         self._next_body_id = 0
@@ -393,6 +411,21 @@ class MujocoWrapper:
             orientation = orientation.ravel().tolist()
 
         robot_spec = self._load_urdf_spec(filename)
+
+        # Disable robot self-collision: the convex-hull collision meshes of
+        # neighbouring links overlap at many poses and produce large spurious
+        # contact forces (the robot "explodes"/flails).  Only foot/floor contact
+        # matters for a whole-body controlled robot.  Using collision groups:
+        #   collide iff (contype_a & conaffinity_b) | (contype_b & conaffinity_a)
+        #   floor is set to contype=1, conaffinity=2 (below);
+        #   robot collision geoms -> contype=2, conaffinity=1
+        #   robot-floor: (2&2)|(1&1) -> collides;  robot-robot: (2&1)|(2&1)=0 -> no
+        # Visual-only geoms already have contype/conaffinity 0 and are left alone.
+        for g in robot_spec.geoms:
+            if g.contype != 0 or g.conaffinity != 0:
+                g.contype = 2
+                g.conaffinity = 1
+
         root = robot_spec.worldbody.bodies[0]
         root.pos = position
         root.quat = _xyzw_to_wxyz(orientation)
@@ -415,11 +448,15 @@ class MujocoWrapper:
             robot_spec.add_actuator(
                 name="mot_" + jn, target=jn, trntype=mujoco.mjtTrn.mjTRN_JOINT,
                 gear=[1, 0, 0, 0, 0, 0])
+            # Damped position servo: force = kp*(ctrl - q) - kv*qdot.
+            # Without the kv term this is an undamped spring that oscillates
+            # forever and never settles onto the commanded (homing) posture.
+            kp, kv = self._POS_KP, self._POS_KV
             robot_spec.add_actuator(
                 name="pos_" + jn, target=jn, trntype=mujoco.mjtTrn.mjTRN_JOINT,
-                gainprm=[1000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                gainprm=[kp, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 biastype=mujoco.mjtBias.mjBIAS_AFFINE,
-                biasprm=[0, -1000, 0, 0, 0, 0, 0, 0, 0, 0])
+                biasprm=[0, -kp, -kv, 0, 0, 0, 0, 0, 0, 0])
 
         # link bodies (child body of each joint), and F/T sensors on each
         for j in hinge_joints:
@@ -759,9 +796,14 @@ class MujocoWrapper:
             joint_ids = range(self.getNumJoints(body_id))
         elif isinstance(joint_ids, int):
             joint_ids = [joint_ids]
-        # disable torque actuators, hold current position on the position ones
+        # disable torque actuators, hold current position on the position ones,
+        # and restore the servo gains (they may have been zeroed by torque mode)
         for j in joint_ids:
             self._set_ctrl("mot_", body_id, j, 0.0)
+            aid = self._actuator_id("pos_", body_id, j)
+            self._model.actuator_gainprm[aid, 0] = self._POS_KP
+            self._model.actuator_biasprm[aid, 1] = -self._POS_KP
+            self._model.actuator_biasprm[aid, 2] = -self._POS_KV
             self._set_ctrl("pos_", body_id, j,
                            self._data.qpos[self._qpos_adr(body_id, j)])
 
@@ -771,13 +813,14 @@ class MujocoWrapper:
             joint_ids = range(self.getNumJoints(body_id))
         elif isinstance(joint_ids, int):
             joint_ids = [joint_ids]
-        # zero the position actuators so only motor torques act
+        # fully neutralise the position servo (incl. its kv damping term) so
+        # only the motor torques act on the joints
         for j in joint_ids:
             aid = self._actuator_id("pos_", body_id, j)
             self._data.ctrl[aid] = 0.0
-            # neutralise the position servo gains so it stops fighting the motors
             self._model.actuator_gainprm[aid, 0] = 0.0
             self._model.actuator_biasprm[aid, 1] = 0.0
+            self._model.actuator_biasprm[aid, 2] = 0.0
 
     def _set_ctrl(self, prefix, body_id, local_idx, value):
         aid = self._actuator_id(prefix, body_id, local_idx)

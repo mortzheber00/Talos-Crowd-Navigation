@@ -200,11 +200,23 @@ class MujocoWrapper:
             name="floor",
             type=mujoco.mjtGeom.mjGEOM_PLANE,
             size=[0, 0, 0.05],
+            rgba=[0.3, 0.5, 0.6, 1.0],  # NEU: Ein angenehmes, kontrastreiches Blau-Grau
             friction=self._floor_friction)
         floor.solref = [0.005, 1.0]           # 5 ms time constant -> stiff
         floor.solimp = [0.95, 0.99, 0.001, 0.5, 2.0]
         floor.contype = 1                     # collision groups: see createBodyFromUrdf
         floor.conaffinity = 2
+
+        # # --- NEU: Direktionales Sonnenlicht ---
+        self._spec.worldbody.add_light(
+            name="sun",
+            type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
+            diffuse=[0.8, 0.8, 0.8],
+            specular=[0.2, 0.2, 0.2],
+            pos=[0, 0, 10],       
+            dir=[0.1, 0.1, -1.0], 
+            castshadow=True
+        )
 
         self._bodies = {}          # body_id -> _BodyRecord
         self._next_body_id = 0

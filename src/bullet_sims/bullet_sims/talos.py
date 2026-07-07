@@ -19,7 +19,8 @@ from bullet_sims.footstep_planner import Side
 # ROS visualizations
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import JointState, Image, CameraInfo
+from std_msgs.msg import Header
 from geometry_msgs.msg import WrenchStamped
 from visualization_msgs.msg import MarkerArray, Marker
 from tf2_ros import TransformBroadcaster
@@ -117,7 +118,68 @@ class Talos(Robot):
         # Store joint names for publishing
         self.joint_names = list(self.robot.jointNameIndexMap().keys())
         self.joint_names = self.joint_names[1:]  # Remove base link name if present
-           
+
+        ########################################################################
+        # onboard depth camera
+        ########################################################################
+        # Attach a MuJoCo camera to the robot's real RGB-D sensor frame and set
+        # up the ROS publisher.  'rgbd_optical_frame' already follows the ROS
+        # optical convention (+Z forward, +X right, +Y down), so the rendered
+        # depth image *and* its frame_id line up directly with TF / RViz.
+        self.depth_frame_id = 'rgbd_optical_frame'
+        self._has_depth_cam = False
+
+        # Camera intrinsic parameters
+        self.depth_width = 640
+        self.depth_height = 480
+        self.depth_fovy = 58.0  # vertical field of view in degrees
+
+        # Publishers for depth image and camera info
+        self.depth_pub = self.ros_node.create_publisher(
+            Image, '/camera/depth/image_rect', 10
+        )
+        self.camera_info_pub = self.ros_node.create_publisher(
+            CameraInfo, '/camera/depth/camera_info', 10
+        )
+
+        # Compute camera intrinsic matrix once at startup
+        self._compute_camera_intrinsics()
+
+        # Mount the MuJoCo camera so it *coincides* with the URDF's existing
+        # rgbd_optical_frame (published statically by robot_state_publisher as
+        # head_2_link -> rgbd_link -> rgbd_optical_frame). We do NOT broadcast
+        # this transform ourselves -- doing so would give rgbd_optical_frame a
+        # second parent and break the TF tree ("Could not transform ... world").
+        #
+        # URDF geometry (talos_reduced_no_hands):
+        #   rgbd_joint         head_2_link -> rgbd_link           xyz=(0.066,0,0.1982) rpy=0
+        #   rgbd_optical_joint rgbd_link  -> rgbd_optical_frame   xyz=0 rpy=(-90,0,-90) deg
+        # => optical frame origin in head_2_link = (0.066, 0, 0.1982), and its
+        #    +Z (view axis) points along head_2_link +X (straight ahead).
+        # A MuJoCo camera looks down its own -Z, so the quaternion below aligns
+        # cam -Z with optical +Z (it equals addCameraToLink's "look forward"
+        # default; see the derivation for [0.5,-0.5,-0.5,0.5] xyzw).
+        self.camera_parent_link = 'head_2_link'
+        self.camera_pos = [0.066, 0.0, 0.1982]              # = URDF rgbd_link origin
+        self.camera_orient = [0.5, -0.5, -0.5, 0.5]         # xyzw: cam frame == rgbd_optical_frame
+
+        if hasattr(self.sim, 'addCameraToLink'):
+            try:
+                self.sim.addCameraToLink(
+                    self.camera_parent_link,
+                    name='rgbd_depth_cam',
+                    pos=self.camera_pos,
+                    orientation=self.camera_orient,
+                    fovy=self.depth_fovy, width=self.depth_width, height=self.depth_height,
+                )
+                self._has_depth_cam = True
+                print(f'[Talos] Tiefenkamera an {self.camera_parent_link} ausgerichtet auf {self.depth_frame_id}')
+            except Exception as e:
+                print(f'[Talos] Fehler: Tiefenkamera konnte nicht angehängt werden: {e}')
+                self._has_depth_cam = False
+        else:
+            self._has_depth_cam = False
+
     def update(self):
         """updates the robot
         """
@@ -200,8 +262,13 @@ class Talos(Robot):
     
     def publish(self):
         """Publish ROS messages for joint states, odometry, wrenches, and markers"""
-        # Einheitlichen Zeitstempel generieren
+        # Einheitlichen Zeitstempel generieren.  Wird gespeichert, damit
+        # publish_depth_image() im selben Zyklus EXAKT denselben Stempel nutzt:
+        # traegt die Punktwolke einen (auch nur ms) juengeren Stempel als der
+        # letzte TF, verweigert RViz den Lookup mit einer ExtrapolationException
+        # ("Could not transform ... to world").
         stamp = self.ros_node.get_clock().now().to_msg()
+        self._last_pub_stamp = stamp
         
         # 1. Gelenkzustände (Exakt deine funktionierende Logik!)
         js = JointState()
@@ -233,7 +300,14 @@ class Talos(Robot):
         t.transform.rotation.z = float(world_orient.z)
         t.transform.rotation.w = float(world_orient.w)
         self.tf_broadcaster.sendTransform(t)
-        
+
+        # NOTE: We deliberately do NOT broadcast head_2_link -> rgbd_optical_frame
+        # here. That frame is already published statically by robot_state_publisher
+        # from the URDF (head_2_link -> rgbd_link -> rgbd_optical_frame). Publishing
+        # it again would give the frame two parents and break the TF tree. The
+        # MuJoCo camera is instead mounted to coincide with that URDF frame
+        # (see __init__: camera_pos / camera_orient).
+
         # 3. F/T-Sensoren (Wrenches) an den Füßen publizieren
         client_id = getattr(self.sim, 'physicsClientId', 0)
         
@@ -268,6 +342,99 @@ class Talos(Robot):
         marker_array.markers.append(self._create_marker(0, self.zmp, [1.0, 0.0, 0.0, 1.0], 0.04, 'world', 'zmp', stamp))
         marker_array.markers.append(self._create_marker(1, self.dcm, [0.0, 0.0, 1.0, 1.0], 0.04, 'world', 'dcm', stamp))
         # self.marker_pub.publish(marker_array)
+
+    def _compute_camera_intrinsics(self):
+        """Compute camera intrinsic matrix K and projection matrix P from MuJoCo parameters.
+
+        Uses the vertical field of view (fovy) to compute focal length:
+        fy = (height / 2) / tan(fovy_rad / 2)
+        Assumes square pixels, so fx = fy.
+        Principal point is at the image center.
+        """
+        fovy_rad = np.radians(self.depth_fovy)
+        fy = (self.depth_height / 2.0) / np.tan(fovy_rad / 2.0)
+        fx = fy  # Assume square pixels
+        cx = self.depth_width / 2.0
+        cy = self.depth_height / 2.0
+
+        # Intrinsic matrix K (3x3)
+        self.K = np.array([
+            [fx, 0.0, cx],
+            [0.0, fy, cy],
+            [0.0, 0.0, 1.0]
+        ], dtype=np.float64)
+
+        # Projection matrix P (3x4) for monocular camera
+        self.P = np.array([
+            [fx, 0.0, cx, 0.0],
+            [0.0, fy, cy, 0.0],
+            [0.0, 0.0, 1.0, 0.0]
+        ], dtype=np.float64)
+
+        # Distortion coefficients (empty for ideal camera)
+        self.D = np.array([], dtype=np.float64)
+
+    def get_depth_image(self):
+        """Return the onboard camera's metric depth as an (H, W) float32 numpy
+        array (values in metres).
+
+        Pixels that hit nothing are returned as NaN (not 0.0): for a 32FC1
+        depth image depth_image_proc treats every *finite* value as a valid 3D
+        point, so 0.0 would spawn a wall of bogus points at the camera origin.
+        NaN is the REP-118 "no return" sentinel and is dropped from the cloud.
+        """
+        return self.sim.get_depth_image(invalid_to=np.nan)
+
+    def publish_depth_image(self):
+        """Publish the depth image and its CameraInfo under ONE identical stamp.
+
+        depth_image_proc's point_cloud_xyz node pairs image + camera_info with
+        an *ExactTime* synchronizer, so both headers must carry the byte-for-byte
+        same ``stamp`` and ``frame_id``.  We guarantee that by rendering first,
+        taking a single ``Time``, and sharing the very same header object between
+        both messages -- there is no room for a sub-microsecond drift.
+        """
+        if not self._has_depth_cam:
+            return
+
+        # Render first: a slow or failed render must never sit between the two
+        # get_clock() reads and desynchronise the stamps.
+        depth = np.ascontiguousarray(self.get_depth_image(), dtype=np.float32)
+        h, w = int(depth.shape[0]), int(depth.shape[1])
+
+        # ONE Time -> ONE header, shared verbatim by image and camera_info.
+        # Reuse the stamp of the publish() call from this cycle (TF + joint
+        # states): the resulting point cloud then matches the TF tree exactly,
+        # so RViz's lookup is an exact hit instead of a future-extrapolation.
+        # Fallback to now() only if publish() has not run yet.
+        header = Header()
+        header.stamp = getattr(self, '_last_pub_stamp', None) \
+            or self.ros_node.get_clock().now().to_msg()
+        header.frame_id = self.depth_frame_id
+
+        img_msg = Image()
+        img_msg.header = header
+        img_msg.height = h
+        img_msg.width = w
+        img_msg.encoding = '32FC1'          # float32 metres
+        img_msg.is_bigendian = 0
+        img_msg.step = w * 4                 # 4 bytes / float32 pixel
+        img_msg.data = depth.tobytes()
+
+        info_msg = CameraInfo()
+        info_msg.header = header             # same object => identical stamp+frame_id
+        info_msg.height = h
+        info_msg.width = w
+        info_msg.distortion_model = 'plumb_bob'
+        info_msg.d = [0.0, 0.0, 0.0, 0.0, 0.0]   # ideal pinhole, 5 zeros for plumb_bob
+        info_msg.k = self.K.flatten().tolist()
+        info_msg.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        info_msg.p = self.P.flatten().tolist()
+
+        # Ordering is irrelevant for ExactTime (each input has its own queue);
+        # info-then-image just mirrors the usual camera-driver convention.
+        self.camera_info_pub.publish(info_msg)
+        self.depth_pub.publish(img_msg)
 
     def _create_marker(self, marker_id, position, color, scale, frame_id, ns, timestamp):
         """Helper function to create a sphere marker"""
@@ -593,7 +760,9 @@ def run_test():
                 t_publish = t
                 # 1. Daten über die internen Publisher herausschicken
                 robot.publish()
-                # 2. Den ROS 2 Node kurz "atmen" lassen, um Callbacks/Daten zu verarbeiten
+                # 2. Tiefenbild und CameraInfo publizieren
+                robot.publish_depth_image()
+                # 3. Den ROS 2 Node kurz "atmen" lassen, um Callbacks/Daten zu verarbeiten
                 rclpy.spin_once(robot.ros_node, timeout_sec=0.0)
 
             debug_counter += 1

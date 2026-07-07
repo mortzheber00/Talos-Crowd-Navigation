@@ -226,6 +226,11 @@ class MujocoWrapper:
         self._dirty = True         # spec changed -> needs (re)compile
         self._viewer = None
 
+        # offscreen depth camera state (see addCameraToLink / get_depth_image)
+        self._cam_name = None
+        self._cam_wh = (640, 480)  # (width, height) of the depth image
+        self._renderer = None      # lazily-created mujoco.Renderer
+
         self._floor = Floor(self)
 
     # ------------------------------------------------------------------ #
@@ -244,7 +249,12 @@ class MujocoWrapper:
         elif self._dirty:
             # recompile in place, keeping the current state where possible
             self._model, self._data = self._spec.recompile(self._model, self._data)
+            mujoco.mj_forward(self._model, self._data)  # refresh derived poses (cam_xpos, ...)
             self._dirty = False
+            # the model object was replaced -> any cached renderer is now stale
+            if self._renderer is not None:
+                self._renderer.close()
+                self._renderer = None
 
     def _apply_pending_state(self):
         # placeholder hook: initial poses are applied through resetJointState /
@@ -892,6 +902,104 @@ class MujocoWrapper:
                         radius=0.02, color=[1, 0, 0, 1]):
         # Visual-only marker; not represented as a body in this backend.
         return -1
+
+    # ------------------------------------------------------------------ #
+    # onboard depth camera
+    # ------------------------------------------------------------------ #
+
+    def addCameraToLink(self, link_name="head_link", name="head_cam",
+                        pos=(0.05, 0.0, 0.10), orientation=None,
+                        fovy=58.0, width=640, height=480):
+        """Attach a camera to ``link_name`` (e.g. the robot's head) via MjSpec.
+
+        The camera rides along with the body once compiled.  MuJoCo cameras look
+        down their own local -Z axis, with +X pointing right and +Y up (OpenGL
+        convention).  ``orientation`` is the camera pose *relative to the parent
+        link* as a PyBullet ``[x, y, z, w]`` quaternion.  When ``None`` a default
+        is used that makes the camera look along the link's +X axis (typical
+        "robot forward") with +Z as image-up.
+
+        ``fovy`` is the vertical field of view in degrees; ``width``/``height``
+        set the offscreen image resolution.
+        """
+        # Locate the (already-merged) body in the world spec.  attach_body() in
+        # createBodyFromUrdf kept the original URDF link names, so a plain lookup
+        # works; MuJoCo turns each URDF <link> into a body of the same name.
+        body = self._spec.body(link_name)
+        if body is None:
+            names = [b.name for b in self._spec.bodies]
+            raise ValueError(
+                f"link '{link_name}' not found in the model. "
+                f"available bodies: {names}")
+
+        if orientation is None:
+            # Camera axes expressed in the parent (head) frame:
+            #   cam +X (right) -> head -Y,  cam +Y (up) -> head +Z,
+            #   cam -Z (view dir) -> head +X   (i.e. look straight ahead)
+            R = np.array([0.0, 0.0, -1.0,
+                          -1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0])
+            quat_wxyz = np.zeros(4)
+            mujoco.mju_mat2Quat(quat_wxyz, R)
+        else:
+            quat_wxyz = _xyzw_to_wxyz(orientation)
+
+        cam = body.add_camera(
+            name=name,
+            pos=np.asarray(pos, dtype=float),
+            quat=quat_wxyz,
+            fovy=fovy)
+
+        # The offscreen framebuffer must be at least as large as the image we
+        # want to read back (MuJoCo defaults to 640x480 and errors otherwise).
+        g = self._spec.visual.global_
+        g.offwidth = max(int(getattr(g, "offwidth", 640)), int(width))
+        g.offheight = max(int(getattr(g, "offheight", 480)), int(height))
+
+        self._cam_name = name
+        self._cam_wh = (int(width), int(height))
+
+        # adding a camera changes model sizes -> recompile (state is preserved),
+        # and drop any renderer bound to the previous model.
+        self._dirty = True
+        if self._renderer is not None:
+            self._renderer.close()
+            self._renderer = None
+        self._ensure_compiled()
+        return cam
+
+    def get_depth_image(self, invalid_to=0.0):
+        """Render the onboard camera and return metric depth as an ``(H, W)``
+        float32 numpy array, ready to publish as a ROS 2 depth image.
+
+        Values are distances from the camera in **metres**.  Pixels that hit no
+        geometry (background) sit at the far clipping plane; those are replaced
+        with ``invalid_to`` (default 0.0, the ROS convention for "no reading";
+        pass ``np.nan`` if your pipeline prefers NaN).
+
+        Call :meth:`addCameraToLink` once before using this.
+        """
+        if self._cam_name is None:
+            raise RuntimeError(
+                "no camera configured -- call addCameraToLink(...) first")
+
+        self._ensure_compiled()
+
+        width, height = self._cam_wh
+        if self._renderer is None:
+            # note: offscreen rendering needs a GL context. On a headless host
+            # set the env var MUJOCO_GL=egl (GPU) or MUJOCO_GL=osmesa (CPU)
+            # before the first render.
+            self._renderer = mujoco.Renderer(self._model, height, width)
+            self._renderer.enable_depth_rendering()
+
+        self._renderer.update_scene(self._data, camera=self._cam_name)
+        depth = self._renderer.render()          # float32 (H, W), metres
+
+        # background pixels come back at the far plane distance -> mask them out
+        far = float(self._model.stat.extent * self._model.vis.map.zfar)
+        depth = np.where(depth >= 0.999 * far, invalid_to, depth)
+        return depth.astype(np.float32)
 
     # ------------------------------------------------------------------ #
     # utility

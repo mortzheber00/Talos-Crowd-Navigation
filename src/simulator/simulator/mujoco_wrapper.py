@@ -255,6 +255,14 @@ class MujocoWrapper:
             if self._renderer is not None:
                 self._renderer.close()
                 self._renderer = None
+            # the passive viewer is bound to the *old* model/data objects, so
+            # after a recompile (e.g. a camera was added) it would freeze on
+            # stale state -> re-launch it against the new model/data.
+            if self._viewer is not None:
+                self._viewer.close()
+                self._viewer = None
+                if self._render:
+                    self._open_viewer()
 
     def _apply_pending_state(self):
         # placeholder hook: initial poses are applied through resetJointState /

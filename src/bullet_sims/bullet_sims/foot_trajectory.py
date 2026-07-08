@@ -8,7 +8,7 @@ class SwingFootTrajectory:
     """SwingFootTrajectory
     Interpolate Foot trajectory between SE3 T0 and T1
     """
-    def __init__(self, T0, T1, duration, height=0.05):
+    def __init__(self, T0, T1, duration, height=0.09):
         """initialize SwingFootTrajectory
 
         Args:

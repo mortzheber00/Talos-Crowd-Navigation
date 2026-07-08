@@ -735,6 +735,27 @@ class MujocoWrapper:
         return self.linkWorldPositions(body_id, link_ids), \
             self.linkWorldOrientation(body_id, link_ids)
 
+    def getLinkState(self, body_id, link_index, computeLinkVelocity=0,
+                     computeForwardKinematics=0, physicsClientId=0):
+        """PyBullet-compatible getLinkState.
+
+        Slots [0], [1] hold the link's world-frame inertial (CoM) pose,
+        matching PyBullet's getLinkState convention (see _com_pos/_com_orn),
+        and [4], [5] hold the URDF link frame origin (MuJoCo xpos/xmat).
+        """
+        self._ensure_compiled()
+        com_pos = self._link_pos(body_id, link_index)
+        com_orn = self._link_orn(body_id, link_index)
+        mjid = self._body_mjid(body_id, link_index)
+        frame_pos = np.array(self._data.xpos[mjid])
+        frame_quat = np.zeros(4)
+        mujoco.mju_mat2Quat(frame_quat, self._data.xmat[mjid].ravel())
+        frame_orn = _wxyz_to_xyzw(frame_quat)
+        local_inertial_pos = np.zeros(3)
+        local_inertial_orn = np.array([0.0, 0.0, 0.0, 1.0])
+        return (com_pos, com_orn, local_inertial_pos, local_inertial_orn,
+                frame_pos, frame_orn)
+
     def linkMass(self, body_id, link_ids):
         self._ensure_compiled()
         if isinstance(link_ids, int):

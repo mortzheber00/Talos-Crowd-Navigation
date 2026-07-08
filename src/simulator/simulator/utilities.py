@@ -33,8 +33,8 @@ def matrixToQuaternion(R):
     '''
     rotation matrix to Quaternion [x,y,z,w]
     '''
-    Q = ei.Quaterniond(ei.Matrix3d(R))
-    return np.array([Q.x(), Q.y(), Q.z(), Q.w()])
+    Q = ei.Quaternion(R)
+    return np.array([Q.x, Q.y, Q.z, Q.w])
 
 def quaternionToEuler(Q):
     '''

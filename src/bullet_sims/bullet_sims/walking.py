@@ -341,12 +341,22 @@ def main():
 
     fig.tight_layout()
     import os
-    plots_dir = '/workspaces/leggedrobots/plots/T7'
-    os.makedirs(plots_dir, exist_ok=True)
-    out_path = os.path.join(plots_dir, 'walking_results.png')
-    fig.savefig(out_path, dpi=150)
-    print(f"saved plots to {out_path}")
-    plt.show()
+    # save next to this package (repo-relative) instead of a hardcoded absolute
+    # path, and never let a failed save/show abort the run
+    plots_dir = os.environ.get(
+        'WALKING_PLOTS_DIR',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plots', 'T7'))
+    try:
+        os.makedirs(plots_dir, exist_ok=True)
+        out_path = os.path.join(plots_dir, 'walking_results.png')
+        fig.savefig(out_path, dpi=150)
+        print(f"saved plots to {out_path}")
+    except OSError as e:
+        print(f"could not save plots to {plots_dir}: {e}")
+    try:
+        plt.show()
+    except Exception as e:
+        print(f"could not show plots: {e}")
 
     if rclpy.ok():
         rclpy.shutdown()

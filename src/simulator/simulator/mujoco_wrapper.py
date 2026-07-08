@@ -431,6 +431,11 @@ class MujocoWrapper:
             if g.contype != 0 or g.conaffinity != 0:
                 g.contype = 2
                 g.conaffinity = 1
+                # Put collision geoms (the convex hulls) in visualization group 3,
+                # which the viewer hides by default (geomgroup = [1,1,1,0,0,0]).
+                # Visual meshes stay in group 0; press "3" in the viewer to show
+                # the hulls again for debugging.
+                g.group = 3
 
         root = robot_spec.worldbody.bodies[0]
         root.pos = position

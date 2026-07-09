@@ -7,9 +7,11 @@ loop, LIP-MPC, foot-step planner, contact state machine, force filtering,
 matplotlib plots).
 
 The robot simply stands in its home posture (held by the joint position
-servos).  A static object is spawned in front of the head camera and the
-onboard depth image is streamed to ROS 2 on /camera/depth/image_raw, alongside
-the usual joint states / TF so the robot stays visible in RViz.
+servos).  A crowd of 5 scripted cylinder agents (CrowdEnv) moves in front of
+the head camera; the onboard depth image is streamed to ROS 2 on
+/camera/depth/image_raw, alongside the usual joint states / TF so the robot
+stays visible in RViz, and per-cylinder 2D obstacle estimates (x, y, r, vx,
+vy) are extracted from aligned depth + segmentation renders for ORCA.
 """
 
 import numpy as np
@@ -25,6 +27,7 @@ from bullet_sims.tsid_wrapper import TSIDWrapper
 import bullet_sims.talos_conf as conf
 
 from bullet_sims.talos import Talos
+from bullet_sims.crowd_env import CrowdEnv
 
 # ROS
 import rclpy
@@ -90,8 +93,9 @@ def main():
     # Hold the home posture (position control is enabled by Robot.__init__).
     # robot.setActuatedJointPositions(q_home)
 
-    # Spawn a static target ~1.7 m in front of the robot, roughly at head height.
-    spawn_static_box(simulator, position=(1.7, 0.0, 1.2))
+    # Spawn the crowd of 5 scripted cylinder agents in front of the camera.
+    crowd = CrowdEnv(simulator)
+    robot.set_obstacle_geoms(crowd.geom_names)
     # spawning recompiled the model -> re-command the home posture.
     robot.setActuatedJointPositions(q_home)
 
@@ -131,8 +135,12 @@ def main():
                 t_publish = t
                 robot.publish()              # joint states + TF (RViz)
                 robot.publish_depth_image()  # depth image (32FC1)
+                robot.update_obstacles()     # (x, y, r, vx, vy) per cylinder
+                robot.publish_obstacle_markers(crowd.ground_truth())
                 rclpy.spin_once(robot.ros_node, timeout_sec=0.0)
 
+            # move the crowd every physics step so the motion is smooth
+            crowd.update(simulator.simTime())
             simulator.step()
 
 

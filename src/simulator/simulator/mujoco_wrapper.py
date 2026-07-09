@@ -999,8 +999,9 @@ class MujocoWrapper:
             # set the env var MUJOCO_GL=egl (GPU) or MUJOCO_GL=osmesa (CPU)
             # before the first render.
             self._renderer = mujoco.Renderer(self._model, height, width)
-            self._renderer.enable_depth_rendering()
 
+        # the renderer may have been left in another mode (segmentation)
+        self._renderer.enable_depth_rendering()
         self._renderer.update_scene(self._data, camera=self._cam_name)
         depth = self._renderer.render()          # float32 (H, W), metres
 
@@ -1008,6 +1009,62 @@ class MujocoWrapper:
         far = float(self._model.stat.extent * self._model.vis.map.zfar)
         depth = np.where(depth >= 0.999 * far, invalid_to, depth)
         return depth.astype(np.float32)
+
+    def get_depth_and_seg_image(self, invalid_to=np.nan):
+        """Render the onboard camera once and return the pixel-registered pair
+
+        * depth: ``(H, W)`` float32, metric eye-space z in metres (background
+          pixels replaced with ``invalid_to``)
+        * seg:   ``(H, W, 2)`` int32, per pixel ``(object id, object type)``
+          where the type is an ``mjtObj`` value (geoms: ``mjOBJ_GEOM``) and
+          background pixels are ``(-1, -1)``
+
+        Both images come from a single ``update_scene`` on the same renderer,
+        so they are guaranteed to be aligned pixel-for-pixel.
+        """
+        if self._cam_name is None:
+            raise RuntimeError(
+                "no camera configured -- call addCameraToLink(...) first")
+
+        self._ensure_compiled()
+
+        width, height = self._cam_wh
+        if self._renderer is None:
+            self._renderer = mujoco.Renderer(self._model, height, width)
+
+        self._renderer.update_scene(self._data, camera=self._cam_name)
+
+        self._renderer.enable_depth_rendering()
+        depth = self._renderer.render()          # float32 (H, W), metres
+        self._renderer.enable_segmentation_rendering()   # turns depth mode off
+        seg = self._renderer.render()            # int32 (H, W, 2), bg = (-1,-1)
+        self._renderer.disable_segmentation_rendering()
+
+        far = float(self._model.stat.extent * self._model.vis.map.zfar)
+        depth = np.where(depth >= 0.999 * far, invalid_to, depth)
+        return depth.astype(np.float32), seg
+
+    def get_camera_pose(self):
+        """World pose of the onboard camera as ``(pos (3,), R_world_cam (3,3))``.
+
+        The rotation follows the MuJoCo camera convention: the camera looks
+        along its local -Z axis with +Y as image-up. To convert to the ROS
+        optical convention (+Z forward, +Y down) negate the Y and Z columns.
+        """
+        if self._cam_name is None:
+            raise RuntimeError(
+                "no camera configured -- call addCameraToLink(...) first")
+        self._ensure_compiled()
+        cam_id = self._model.camera(self._cam_name).id
+        return (self._data.cam_xpos[cam_id].copy(),
+                self._data.cam_xmat[cam_id].reshape(3, 3).copy())
+
+    def getGeomId(self, name):
+        """Numeric geom id for a named geom (as it appears in segmentation
+        images). Ids are only valid for the current model: re-query after any
+        recompile instead of caching them across model changes."""
+        self._ensure_compiled()
+        return self._model.geom(name).id
 
     # ------------------------------------------------------------------ #
     # utility

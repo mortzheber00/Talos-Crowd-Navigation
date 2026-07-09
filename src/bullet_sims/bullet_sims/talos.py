@@ -12,10 +12,6 @@ from bullet_sims.footstep_planner import Side
 # ROS visualizations
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import JointState, Image, CameraInfo
-from std_msgs.msg import Header
-from geometry_msgs.msg import WrenchStamped
-from visualization_msgs.msg import MarkerArray, Marker
 from tf2_ros import TransformBroadcaster
 from sensor_msgs.msg import JointState
 from nav_msgs.msg import Odometry
@@ -72,36 +68,15 @@ class Talos:
         ########################################################################
         # visualizations
         ########################################################################
-        
-        # Initialize ROS node if not already done
-        if not rclpy.ok():
-            rclpy.init()
-        self.ros_node = Node('talos_controller')
-        
-        # Joint state publisher
-        self.joint_state_pub = self.ros_node.create_publisher(
-            JointState, 'joint_states', 10
-        )
-        
-        # Floating base broadcaster (TF2 for odometry)
-        self.tf_broadcaster = TransformBroadcaster(self.ros_node)
-        
-        # ZMP and DCM point publisher (MarkerArray for visualization)
-        self.marker_pub = self.ros_node.create_publisher(
-            MarkerArray, 'markers', 10
-        )
-        
-        # Wrench publishers for left and right foot
-        self.wrench_rf_pub = self.ros_node.create_publisher(
-            WrenchStamped, 'foot_forces/right', 10
-        )
-        self.wrench_lf_pub = self.ros_node.create_publisher(
-            WrenchStamped, 'foot_forces/left', 10
-        )
-        
-        # Store joint names for publishing
-        self.joint_names = list(self.robot.jointNameIndexMap().keys())
-        self.joint_names = self.joint_names[1:]  # Remove base link name if present
+        self._node = rclpy.create_node("walking_control_node")
+        self._joint_names = list(self.robot.actuatedJointNames())
+        self._tf_broadcaster = TransformBroadcaster(self._node)
+
+        self._joint_pub = self._node.create_publisher(JointState, 'joint_states', 10)
+        self._odom_pub = self._node.create_publisher(Odometry, 'odom', 10)
+        self._zmp_pub = self._node.create_publisher(MarkerArray, 'zmp', 10)
+        self._wrench_rf_pub = self._node.create_publisher(WrenchStamped, 'wrench_rf', 10)
+        self._wrench_lf_pub = self._node.create_publisher(WrenchStamped, 'wrench_lf', 10)
            
     def update(self):
         """updates the robot

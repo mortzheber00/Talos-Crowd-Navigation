@@ -74,7 +74,7 @@ base_frame_name = "base_link"               # base link
 # Task weights
 w_com = 1e1             # weight of center of mass task
 w_am = 1e-4             # weight of angular momentum task
-w_foot = 1e-1           # weight of the foot motion task: here no motion
+w_foot = 5e0            # weight of the swing-foot motion task (walking needs real tracking)
 w_hand = 1e-1           # weight of the hand motion task
 w_torso = 1             # weight torso orientation motion task
 w_feet_contact = 1e5    # weight of foot in contact (negative means infinite weight)
@@ -86,7 +86,8 @@ w_joint_bounds = 0.0    # weight of the velocity bounds: here no bounds
 
 # weights
 kp_contact = 10.0       # proportional gain of contact constraint
-kp_foot = 10.0          # proportional gain of contact constraint
+kp_foot = 150.0         # proportional gain of swing-foot motion task (was 10: too soft to
+                        # place the foot within a step -> foot mistracks -> capture-point fall)
 kp_hand = 10.0          # proportional gain of hand constraint
 kp_hand_rh = 10.0  
 kp_hand_lh = 10.0
@@ -106,7 +107,7 @@ kp_posture = np.array([
 masks_posture = np.ones(na)                     # mask out joint (here none)
 
 tau_max_scaling = 1.45          # scaling factor of torque bounds
-v_max_scaling = 0.8             # scaling velocity bounds
+v_max_scaling = 1.8             # scaling velocity bounds
 
 ################################################################################
 # walking

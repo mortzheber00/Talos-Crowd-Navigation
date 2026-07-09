@@ -1,5 +1,5 @@
 import numpy as np 
-from scipy.optimize import minimizet 
+from scipy.optimize import minimize
 
 
 def orca_half_plane(ego, other, tau, dt, weight=0.5):

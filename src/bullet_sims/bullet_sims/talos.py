@@ -1,5 +1,6 @@
 import numpy as np
 import pinocchio as pin
+import mujoco
 
 # simulator
 #>>>>TODO: Fix include
@@ -179,6 +180,17 @@ class Talos(Robot):
                 self._has_depth_cam = False
         else:
             self._has_depth_cam = False
+
+        ########################################################################
+        # 2D obstacle tracking (segmentation-based, for ORCA)
+        ########################################################################
+        # Tracks are keyed by geom NAME, not id: model recompiles renumber the
+        # ids, names stay stable.
+        self._obstacle_geom_names = []   # set via set_obstacle_geoms()
+        self._obstacles = {}             # name -> dict(id,x,y,r,vx,vy,stale,t)
+        self._obs_ema_alpha = 0.3        # velocity EMA smoothing factor
+        self._obs_last_t = None          # sim time of the previous update
+        self.MIN_OBSTACLE_PIXELS = 30    # below this a mask counts as occluded
 
     def update(self):
         """updates the robot
@@ -459,8 +471,145 @@ class Talos(Robot):
         marker.color.g = color[1]
         marker.color.b = color[2]
         marker.color.a = color[3]
-        
+
         return marker
+
+    ############################################################################
+    # 2D obstacle perception (depth + segmentation) for ORCA
+    ############################################################################
+
+    def set_obstacle_geoms(self, names):
+        """Register the geom names of the dynamic obstacles (e.g.
+        ``CrowdEnv.geom_names``) that update_obstacles() should track."""
+        self._obstacle_geom_names = list(names)
+
+    def obstacles2d(self):
+        """Current 2D obstacle estimates for a local planner (ORCA):
+        list of ``{id, x, y, r, vx, vy, stale}`` in WORLD coordinates.
+        ``stale`` marks tracks that were occluded/out of view on the last
+        update and still carry their previous estimate."""
+        return [dict(v) for v in self._obstacles.values()]
+
+    def update_obstacles(self):
+        """Extract (x, y, r, vx, vy) per tracked cylinder from one aligned
+        depth + segmentation render. Call at the perception rate (~30 Hz).
+
+        Pipeline: segmentation mask per geom id -> pinhole unprojection with K
+        -> transform to world -> ground-plane centroid + radius -> per-track
+        finite-difference velocity smoothed with an EMA.
+        """
+        if not self._has_depth_cam or not self._obstacle_geom_names:
+            return self._obstacles
+
+        t_now = self.sim.simTime()
+        dt = None if self._obs_last_t is None else (t_now - self._obs_last_t)
+        self._obs_last_t = t_now
+
+        depth, seg = self.sim.get_depth_and_seg_image(invalid_to=np.nan)
+        cam_pos, R_wc = self.sim.get_camera_pose()
+        # MuJoCo cameras look along local -Z with +Y up; the pinhole equations
+        # below use the ROS optical convention (+Z forward, +Y down), so flip
+        # the Y and Z axes of the camera rotation.
+        R_w_opt = R_wc @ np.diag([1.0, -1.0, -1.0])
+
+        fx, fy = self.K[0, 0], self.K[1, 1]
+        cx, cy = self.K[0, 2], self.K[1, 2]
+        valid = np.isfinite(depth)
+        geom_pixels = seg[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM)
+
+        for name in self._obstacle_geom_names:
+            gid = self.sim.getGeomId(name)   # per frame: survives recompiles
+            mask = (seg[..., 0] == gid) & geom_pixels & valid
+            prev = self._obstacles.get(name)
+
+            if int(mask.sum()) < self.MIN_OBSTACLE_PIXELS:
+                # occluded or out of view: hold the last estimate, flag it
+                if prev is not None:
+                    prev['stale'] = True
+                continue
+
+            v_pix, u_pix = np.nonzero(mask)          # rows = v, cols = u
+            Z = depth[mask]                          # eye-space z: pinhole-ready
+            X = (u_pix - cx) * Z / fx                # optical frame, +X right
+            Y = (v_pix - cy) * Z / fy                # +Y down
+            pts_w = (R_w_opt @ np.vstack((X, Y, Z))).T + cam_pos
+            xy = pts_w[:, :2]                        # ground-plane projection
+
+            centroid = xy.mean(axis=0)
+            # The camera only sees the front arc of the cylinder, whose
+            # centroid sits ~2r/pi in front of the true axis. Estimate r from
+            # the lateral chord (immune to that bias), then push the center
+            # away from the camera along the viewing ray.
+            ray = centroid - cam_pos[:2]
+            ray /= max(np.linalg.norm(ray), 1e-9)
+            lateral = xy @ np.array([-ray[1], ray[0]])
+            r_est = 0.5 * (lateral.max() - lateral.min())
+            center = centroid + (2.0 / np.pi) * r_est * ray
+            # 10% safety padding on top of whatever the points actually cover
+            radius = 1.10 * max(r_est,
+                                float(np.max(np.linalg.norm(xy - center, axis=1))))
+            # Partial visibility makes the chord underestimate r -- and an
+            # underestimated radius is unsafe for ORCA. Two guards:
+            #  * mask touches the left/right image border (FOV-clipped):
+            #    hold the previous radius outright;
+            #  * otherwise limit shrinking to 1% per frame, so a sliver left
+            #    by a passing occluder cannot collapse the radius before the
+            #    mask drops below MIN_OBSTACLE_PIXELS (-> stale hold). A rigid
+            #    agent's radius never genuinely shrinks that fast.
+            if prev is not None:
+                if u_pix.min() == 0 or u_pix.max() == depth.shape[1] - 1:
+                    radius = max(radius, prev['r'])
+                else:
+                    radius = max(radius, 0.99 * prev['r'])
+
+            if prev is None or dt is None or dt <= 0.0:
+                vx = vy = 0.0                        # first sighting: EMA starts next frame
+            else:
+                v_raw = (center - np.array([prev['x'], prev['y']])) / dt
+                # position jumps when a track re-emerges from behind an
+                # occluder; clamp to human-plausible speeds before smoothing
+                v_raw = np.clip(v_raw, -3.0, 3.0)
+                a = self._obs_ema_alpha
+                vx = a * v_raw[0] + (1.0 - a) * prev['vx']
+                vy = a * v_raw[1] + (1.0 - a) * prev['vy']
+
+            self._obstacles[name] = dict(
+                id=gid, x=float(center[0]), y=float(center[1]),
+                r=float(radius), vx=float(vx), vy=float(vy),
+                stale=False, t=t_now)
+
+        return self._obstacles
+
+    def publish_obstacle_markers(self, ground_truth=None):
+        """RViz overlay of the obstacle estimates: cyan cylinders at the
+        estimated (x, y, r), optionally grey ghost cylinders at the ground
+        truth (``CrowdEnv.ground_truth()``) for visual validation."""
+        if not self._obstacles:
+            return
+        stamp = getattr(self, '_last_pub_stamp', None) \
+            or self.ros_node.get_clock().now().to_msg()
+        height = 1.75
+        marker_array = MarkerArray()
+        for i, (name, obs) in enumerate(sorted(self._obstacles.items())):
+            m = self._create_marker(
+                i, [obs['x'], obs['y'], height / 2.0],
+                [0.0, 0.9, 0.9, 0.4 if obs['stale'] else 0.8],
+                1.0, 'world', 'obstacle_estimates', stamp)
+            m.type = Marker.CYLINDER
+            m.scale.x = m.scale.y = 2.0 * obs['r']
+            m.scale.z = height
+            marker_array.markers.append(m)
+        if ground_truth:
+            for i, (name, gt) in enumerate(sorted(ground_truth.items())):
+                m = self._create_marker(
+                    i, [gt['x'], gt['y'], height / 2.0],
+                    [0.7, 0.7, 0.7, 0.3], 1.0, 'world',
+                    'obstacle_ground_truth', stamp)
+                m.type = Marker.CYLINDER
+                m.scale.x = m.scale.y = 2.0 * gt['r']
+                m.scale.z = height
+                marker_array.markers.append(m)
+        self.marker_pub.publish(marker_array)
 
     ############################################################################
     # balance control

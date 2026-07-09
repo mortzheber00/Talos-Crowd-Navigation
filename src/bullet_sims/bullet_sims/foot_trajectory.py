@@ -46,7 +46,18 @@ class SwingFootTrajectory:
         z_mid = 0.5 * (p0[2]+p1[2]) + self._height
         self._spline_z = BPoly.from_derivatives(
             [0, d/2, d],
-            [[p0[2], 0, 0], [z_mid, 0], [p1[2], 0, 0]] # zero vertical velocity at mid-point 
+            [[p0[2], 0, 0], [z_mid, 0], [p1[2], 0, 0]] # zero vertical velocity at mid-point
+        )
+
+        # yaw spline: interpolate the foot heading from T0 to T1 along the
+        # shortest angular path, with zero angular velocity/acceleration at both
+        # ends. This lets the swing foot turn (needed for curved/circular walking);
+        # for straight walking T0 and T1 share a heading, so yaw stays constant.
+        yaw0 = np.arctan2(T0.rotation[1, 0], T0.rotation[0, 0])
+        yaw1 = np.arctan2(T1.rotation[1, 0], T1.rotation[0, 0])
+        dyaw = (yaw1 - yaw0 + np.pi) % (2 * np.pi) - np.pi   # wrap to [-pi, pi]
+        self._spline_yaw = BPoly.from_derivatives(
+            [0, d], [[yaw0, 0, 0], [yaw0 + dyaw, 0, 0]]
         )
 
     def isDone(self):
@@ -61,9 +72,16 @@ class SwingFootTrajectory:
         vel = np.array([self._spline_xy[0](t, 1), self._spline_xy[1](t, 1), self._spline_z(t, 1)])
         acc = np.array([self._spline_xy[0](t, 2), self._spline_xy[1](t, 2), self._spline_z(t, 2)])
 
-        T = pin.SE3(np.eye(3), pos)
-        v = pin.Motion(vel, np.zeros(3))
-        a = pin.Motion(acc, np.zeros(3))
+        # heading (yaw) and its derivatives from the yaw spline
+        yaw = float(self._spline_yaw(t))
+        yaw_dot = float(self._spline_yaw(t, 1))
+        yaw_ddot = float(self._spline_yaw(t, 2))
+        c, s = np.cos(yaw), np.sin(yaw)
+        R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+        T = pin.SE3(R, pos)
+        v = pin.Motion(vel, np.array([0.0, 0.0, yaw_dot]))
+        a = pin.Motion(acc, np.array([0.0, 0.0, yaw_ddot]))
 
         return T, v, a
 

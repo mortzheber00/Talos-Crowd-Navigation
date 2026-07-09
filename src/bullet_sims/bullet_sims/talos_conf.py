@@ -72,7 +72,8 @@ w_com = 1e1             # weight of center of mass task
 w_am = 1e-4             # weight of angular momentum task
 w_foot = 5e0            # weight of the swing-foot motion task (walking needs real tracking)
 w_hand = 1e-1           # weight of the hand motion task
-w_torso = 1             # weight torso orientation motion task
+w_torso = 4             # weight torso orientation task (raised from 1 so the trunk
+                        # actively steers the heading through turns instead of lagging)
 w_feet_contact = 1e5    # weight of foot in contact (negative means infinite weight)
 w_hand_contact = 1e5    # weight for hand in contact
 w_posture = 1e-3        # weight of joint posture task
@@ -87,7 +88,8 @@ kp_foot = 150.0         # proportional gain of swing-foot motion task (was 10: t
 kp_hand = 10.0          # proportional gain of hand constraint
 kp_hand_rh = 10.0  
 kp_hand_lh = 10.0
-kp_torso = 10.0         # proportional gain of torso constraint
+kp_torso = 20.0         # proportional gain of torso task (raised from 10 to track the
+                        # commanded heading more tightly during turns)
 kp_com = 10.0           # proportional gain of com task
 kp_am = 10.0            # proportional gain of angular momentum task
 

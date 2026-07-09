@@ -48,7 +48,7 @@ def main():
     sim = MujocoWrapper(sim_rate=300, num_sub_steps=4, render=True)
 
     crowd = PedestrianSimulator(sim, radius=0.3, height=1.7, max_speed=1.3,
-                                pref_perturb=0.05, goal_tol=0.3, personal_space=0.9)
+                                pref_perturb=0.05, goal_tol=0.3, personal_space=0.3)
     scenarios.build(crowd, scenario)
     _add_goal_markers(sim, crowd)
 
@@ -62,6 +62,8 @@ def main():
 
     while sim.isRunning() and sim.simTime() < max_seconds:
         crowd.update(dt)
+        states=crowd.states()
+        print(f"states: {states}")
         sim.step()
 
         worst = min(worst, crowd.min_separation())

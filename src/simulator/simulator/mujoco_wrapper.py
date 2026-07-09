@@ -168,6 +168,11 @@ class MujocoWrapper:
         self._render = bool(render)
         self._sim_rate = sim_rate
         self._sim_time_step = 1.0 / self._sim_rate
+        # Like PyBullet's numSubSteps: the controller sees a 1/sim_rate control
+        # step, but the physics is integrated with num_sub_steps finer substeps.
+        # A single 1/300 s step is far too coarse for a stiff-contact humanoid
+        # under an inverse-dynamics controller and makes the robot shake apart.
+        self._num_sub_steps = max(1, int(num_sub_steps)) if num_sub_steps else 1
         self._gravity = np.asarray(gravity, dtype=float)
 
         self._running = True
@@ -181,7 +186,7 @@ class MujocoWrapper:
 
         # model building state
         self._spec = mujoco.MjSpec()
-        self._spec.option.timestep = self._sim_time_step
+        self._spec.option.timestep = self._sim_time_step / self._num_sub_steps
         self._spec.option.gravity = self._gravity
         if num_solver_iterations is not None:
             self._spec.option.iterations = int(num_solver_iterations)
@@ -277,7 +282,7 @@ class MujocoWrapper:
 
     def setRealTime(self):
         self._sim_time_step = 1.0 / 240.0
-        self._spec.option.timestep = self._sim_time_step
+        self._spec.option.timestep = self._sim_time_step / self._num_sub_steps
         self._dirty = True
 
     def isRunning(self):
@@ -306,7 +311,8 @@ class MujocoWrapper:
 
     def step(self):
         self._ensure_compiled()
-        mujoco.mj_step(self._model, self._data)
+        # advance one control step = num_sub_steps physics substeps
+        mujoco.mj_step(self._model, self._data, self._num_sub_steps)
         self._sim_count += 1
         self._sim_time = self._sim_count * self._sim_time_step
         if self._viewer is not None:
@@ -455,6 +461,11 @@ class MujocoWrapper:
             if g.contype != 0 or g.conaffinity != 0:
                 g.contype = 2
                 g.conaffinity = 1
+                # Put collision geoms (the convex hulls) in visualization group 3,
+                # which the viewer hides by default (geomgroup = [1,1,1,0,0,0]).
+                # Visual meshes stay in group 0; press "3" in the viewer to show
+                # the hulls again for debugging.
+                g.group = 3
 
         root = robot_spec.worldbody.bodies[0]
         root.pos = position
@@ -765,12 +776,51 @@ class MujocoWrapper:
         return self.linkWorldPositions(body_id, link_ids), \
             self.linkWorldOrientation(body_id, link_ids)
 
+    def getLinkState(self, body_id, link_index, computeLinkVelocity=0,
+                     computeForwardKinematics=0, physicsClientId=0):
+        """PyBullet-compatible getLinkState.
+
+        Slots [0], [1] hold the link's world-frame inertial (CoM) pose,
+        matching PyBullet's getLinkState convention (see _com_pos/_com_orn),
+        and [4], [5] hold the URDF link frame origin (MuJoCo xpos/xmat).
+        """
+        self._ensure_compiled()
+        com_pos = self._link_pos(body_id, link_index)
+        com_orn = self._link_orn(body_id, link_index)
+        mjid = self._body_mjid(body_id, link_index)
+        frame_pos = np.array(self._data.xpos[mjid])
+        frame_quat = np.zeros(4)
+        mujoco.mju_mat2Quat(frame_quat, self._data.xmat[mjid].ravel())
+        frame_orn = _wxyz_to_xyzw(frame_quat)
+        local_inertial_pos = np.zeros(3)
+        local_inertial_orn = np.array([0.0, 0.0, 0.0, 1.0])
+        return (com_pos, com_orn, local_inertial_pos, local_inertial_orn,
+                frame_pos, frame_orn)
+
     def linkMass(self, body_id, link_ids):
         self._ensure_compiled()
         if isinstance(link_ids, int):
             return float(self._model.body_mass[self._body_mjid(body_id, link_ids)])
         return np.array([float(self._model.body_mass[self._body_mjid(body_id, i)])
                          for i in link_ids])
+
+    def computeComPosition(self, body_id, link_ids=None):
+        """Mass-weighted world CoM position (matches the PyBullet wrapper)."""
+        if link_ids is None:
+            link_ids = list(range(self.numJoints(body_id)))
+            link_ids.append(-1)
+        mass = self.linkMass(body_id, link_ids)
+        pos = self.linkWorldPositions(body_id, link_ids)
+        return np.sum(pos.transpose() * mass, axis=1) / np.sum(mass)
+
+    def computeComVelocity(self, body_id, link_ids=None):
+        """Mass-weighted world CoM velocity (matches the PyBullet wrapper)."""
+        if link_ids is None:
+            link_ids = list(range(self.numJoints(body_id)))
+            link_ids.append(-1)
+        mass = self.linkMass(body_id, link_ids)
+        vel = self.linkWorldLinearVelocity(body_id, link_ids)
+        return np.sum(vel.transpose() * mass, axis=1) / np.sum(mass)
 
     # ------------------------------------------------------------------ #
     # joint state

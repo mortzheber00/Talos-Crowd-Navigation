@@ -139,13 +139,17 @@ class LIPMPC:
         self.U_k = None
         self.ZMP_ref_k = None
 
-    def buildSolveOCP(self, x_k, ZMP_ref_k, terminal_idx):
+    def buildSolveOCP(self, x_k, ZMP_ref_k, terminal_idx, yaw_ref_k=None):
         """build and solve ocp
 
         Args:
             x_k (_type_): inital mpc state
             ZMP_ref_k (_type_): zmp reference over horizon
             terminal_idx (_type_): index within horizon to apply terminal constraint
+            yaw_ref_k (optional): per-sample support-foot yaw [rad] over the
+                horizon. When given, the ZMP/CoP feasibility box is rotated into
+                the foot frame so it stays aligned with a yawed (turning) foot.
+                Defaults to None -> yaw 0 -> world-axis-aligned box (straight walk).
 
         Returns:
             _type_: control (first commanded ZMP, length-2 np.array [zmp_x, zmp_y])
@@ -158,6 +162,12 @@ class LIPMPC:
         n_ref = ZMP_ref_k.shape[0]
         N = min(self.no_samples, n_ref)
         N = max(N, 2)
+
+        # per-sample support-foot yaw (0 -> axis-aligned box, backward compatible)
+        if yaw_ref_k is None:
+            yaw_arr = np.zeros(n_ref)
+        else:
+            yaw_arr = np.asarray(yaw_ref_k, dtype=float).ravel()
 
         # ZMP / CoP feasibility box. There is no dedicated zmp_limit constant in
         # talos_conf.py, so derive the bound from the foot footprint half-sizes.
@@ -184,15 +194,24 @@ class LIPMPC:
             for j in range(nx):
                 prog.AddLinearConstraint(state[i + 1, j] == x_next[j])
 
-        # --- ZMP/CoP feasibility constraints (box around the reference) ---
+        # --- ZMP/CoP feasibility constraints (box in the FOOT frame) ---
+        # The commanded ZMP must stay within the support foot. We express the
+        # box in the foot's own frame so it rotates with a yawed/turning foot:
+        # project the world offset (control - ref) onto the foot axes and bound
+        # the fore/aft and lateral components. yaw = 0 recovers the world-aligned
+        # box, so straight walking is unchanged.
         for i in range(N):
             ref = ZMP_ref_k[i]
-            # x (fore/aft): foot extends lfxp forward, lfxn backward of the ankle
-            prog.AddLinearConstraint(control[i, 0] <= ref[0] + lfxp)
-            prog.AddLinearConstraint(control[i, 0] >= ref[0] - lfxn)
-            # y (lateral): symmetric half-width
-            prog.AddLinearConstraint(control[i, 1] <= ref[1] + lfyp)
-            prog.AddLinearConstraint(control[i, 1] >= ref[1] - lfyn)
+            psi = yaw_arr[min(i, len(yaw_arr) - 1)]
+            c, s = np.cos(psi), np.sin(psi)
+            dx = control[i, 0] - ref[0]
+            dy = control[i, 1] - ref[1]
+            local_x = c * dx + s * dy      # fore/aft in the foot frame
+            local_y = -s * dx + c * dy     # lateral in the foot frame
+            prog.AddLinearConstraint(local_x <= lfxp)
+            prog.AddLinearConstraint(local_x >= -lfxn)
+            prog.AddLinearConstraint(local_y <= lfyp)
+            prog.AddLinearConstraint(local_y >= -lfyn)
 
         # --- cost ---
         alpha = self.conf.alpha     # ZMP error squared cost weight
@@ -242,3 +261,19 @@ def generate_zmp_reference(foot_steps, no_samples_per_step):
             zmp_ref.append(pos_xy)
 
     return np.array(zmp_ref)
+
+
+def generate_yaw_reference(foot_steps, no_samples_per_step):
+    """generate the support-foot yaw reference [rad] aligned sample-for-sample
+    with generate_zmp_reference. Feeds the yaw-aware ZMP box in buildSolveOCP so
+    the feasibility box tracks a turning foot. For straight (identity-rotation)
+    footsteps this is all zeros.
+    """
+    yaw_ref = []
+    for step in foot_steps:
+        R = step.poseInWorld().rotation
+        yaw = np.arctan2(R[1, 0], R[0, 0])
+        for _ in range(no_samples_per_step):
+            yaw_ref.append(yaw)
+
+    return np.array(yaw_ref)

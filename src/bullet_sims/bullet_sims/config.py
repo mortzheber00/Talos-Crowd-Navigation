@@ -4,21 +4,16 @@
 import os
 import pinocchio as pin
 import numpy as np
-import rospkg
 
 ################################################################################
 # robot
 ################################################################################
 
-
-rospack = rospkg.RosPack()
-try:
-    talos_description = rospack.get_path('talos_description')
-except:
-    # fallback if workspace not sourced: assume relative path from this file
-    config_dir = os.path.dirname(os.path.abspath(__file__))
-    ws_root = os.path.dirname(os.path.dirname(os.path.dirname(config_dir)))
-    talos_description = os.path.join(ws_root, 'src', 'talos_description')
+# Locate the installed talos_description package via the ROS 2 ament index.
+# (The old rospkg lookup is ROS 1 only and always failed under ROS 2, which
+# sent us into a broken fallback path pointing inside install/bullet_sims/lib.)
+from ament_index_python.packages import get_package_share_directory
+talos_description = get_package_share_directory('talos_description')
 
 urdf = os.path.join(talos_description, "robots/talos_reduced_no_hands.urdf")
 path = os.path.join(talos_description, "meshes/../..")

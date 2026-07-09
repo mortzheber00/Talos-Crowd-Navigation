@@ -2,23 +2,23 @@
 
 ## Schnelle Überprüfung
 
+```bash
+ros2 launch bullet_sims depth_perception.launch.py
+# oder: ros2 launch bullet_sims t23.launch.py
+```
+### Oder separat:
+
 Starte in **drei separaten Terminals**:
 
 ### Terminal 1: Roboter
 ```bash
-ros2 run bullet_sims walking
-# oder: ros2 launch bullet_sims t23.launch.py
+ros2 run bullet_sims stand_and_perceive
 ```
 
 ### Terminal 2: depth_image_proc
 ```bash
 ros2 launch bullet_sims depth_image_proc.launch.py
 ```
-
-### Terminal 3: Debug
-```bash
-# Überprüfe, welche Topics publiziert werden
-ros2 topic list | grep -iE 'depth|camera'
 
 # Überprüfe die Frequenz der Nachrichten
 ros2 topic hz /depth_image_rect

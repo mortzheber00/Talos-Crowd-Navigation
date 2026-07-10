@@ -189,6 +189,38 @@ The two parameters that most change the feel of the crowd are `radius` /
 `personal_space` (how much space pedestrians demand) and `time_horizon` (how far
 ahead they plan — high looks polite and anticipatory, low looks last-second).
 
+### Running the walking demo (runtime parameters)
+
+The full navigation demo — Talos walking to a goal while avoiding the crowd — is:
+
+```bash
+colcon build --packages-select bullet_sims orca_nav
+source install/setup.bash
+ros2 run bullet_sims walking
+```
+
+Two settings can be changed at launch as ROS 2 parameters, without editing code
+or rebuilding (defaults are the constants at the top of `walking.py`):
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `scenario` | string | `random` | Crowd scenario: `head_on`, `crossing`, `circle`, `corridor`, `random`. |
+| `pedestrian_sensor_data` | bool | `false` | `false` = the robot uses ground-truth pedestrian states; `true` = it uses only what its onboard depth camera perceives (`obstacles2d()`). |
+
+Override them with `--ros-args -p name:=value`:
+
+```bash
+# crossing crowd, ground-truth pedestrian states
+ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=false
+
+# head-on crowd, depth-camera perception (only what the robot sees)
+ros2 run bullet_sims walking --ros-args -p scenario:=head_on -p pedestrian_sensor_data:=true
+```
+
+The chosen values are printed at startup. Note: `pedestrian_sensor_data:=true`
+requires the depth+segmentation perception path (the camera-based `update_obstacles()`);
+with `false` the camera is not used at all.
+
 ## Group members final project:
 Lara Heidtmann , Florian Bohnes, Sebastián Serna, Moritz Heber, Nicolas Guenther
 

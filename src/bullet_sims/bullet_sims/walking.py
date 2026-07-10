@@ -52,6 +52,11 @@ ARROW_SCALE = 3.0          # visual stretch so the slow v_cmd arrow is visible
 WALK_DURATION = 30.0       # [s] max walk time (reactive walking has no fixed step count)
 REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MODE plan
 
+# ---- runtime parameters (defaults; override at launch via ROS 2 params, e.g.
+#   ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=true )
+SCENARIO = "random"              # crowd scenario: head_on | crossing | circle | corridor | random
+PEDESTRIAN_SENSOR_DATA = False   # True: depth-camera perception; False: ground-truth states
+
 
 ################################################################################
 # setup helpers
@@ -81,7 +86,7 @@ def _setup_crowd(simulator):
     """
     crowd = PedestrianSimulator(simulator, radius=0.3, max_speed=1.3,
                                 pref_perturb=0.05, personal_space=0.3)
-    scenarios.build(crowd, "random")
+    scenarios.build(crowd, SCENARIO)
     return crowd
 
 
@@ -428,9 +433,17 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         body_id = robot.robot.id()
         com = simulator.computeComPosition(body_id)
         vcom = simulator.computeComVelocity(body_id)
-        # pedestrians avoid the robot (radius inflated as a safety margin)
+        # move the crowd (pedestrians still avoid the robot via ground-truth here)
         crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
-        ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
+        # pedestrian states for the robot come from the ONBOARD DEPTH CAMERA
+        # (only what the robot actually sees), not ground truth. update_obstacles()
+        # refreshes these at the perception rate; obstacles2d() returns the latest
+        # world-frame estimates {id, x, y, r, vx, vy, stale}.
+        if PEDESTRIAN_SENSOR_DATA:
+            ped_states = [(np.array([o['x'], o['y']]), np.array([o['vx'], o['vy']]), o['r'])
+                          for o in robot.obstacles2d()]
+        else:
+            ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
         v_cmd = robot_ctrl.compute_velocity(com[:2], vcom[:2], ped_states)
         v_pref = robot_ctrl.preferred_velocity(com[:2])
 
@@ -536,6 +549,11 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         simulator.step()
         robot.update()
 
+        # --- refresh onboard-camera obstacle estimates at ~30 Hz (after the step,
+        #     so the depth/segmentation render sees the updated scene) ---
+        if PEDESTRIAN_SENSOR_DATA and i % max(1, int(round((1.0 / 30.0) / conf.dt))) == 0:
+            robot.update_obstacles()
+
         # --- navigation diagnostic (once per second while walking) ---
         if i >= 0 and i % int(round(1.0 / conf.dt)) == 0:
             dist_goal = float(np.hypot(*(np.asarray(ROBOT_GOAL, float) - com[:2])))
@@ -560,9 +578,30 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
 # main
 ################################################################################
 
+def _read_runtime_params():
+    """Read runtime ROS 2 parameters and apply them to the module globals.
+    Override at launch, e.g.:
+        ros2 run bullet_sims walking --ros-args \
+            -p scenario:=crossing -p pedestrian_sensor_data:=true
+    """
+    global SCENARIO, PEDESTRIAN_SENSOR_DATA
+    node = rclpy.create_node("walking_params")
+    node.declare_parameter("scenario", SCENARIO)
+    node.declare_parameter("pedestrian_sensor_data", PEDESTRIAN_SENSOR_DATA)
+    SCENARIO = node.get_parameter("scenario").get_parameter_value().string_value
+    PEDESTRIAN_SENSOR_DATA = node.get_parameter(
+        "pedestrian_sensor_data").get_parameter_value().bool_value
+    node.destroy_node()
+    print(f"[walking] scenario='{SCENARIO}'  "
+          f"pedestrian_sensor_data={PEDESTRIAN_SENSOR_DATA}")
+
+
 def main():
     # NOTE: ros2 run skips the __main__ block, so all setup happens here.
     simulator = _setup_simulator()
+
+    # runtime parameters (scenario, sensor vs ground truth) -> module globals
+    _read_runtime_params()
 
     # crowd must be created before the robot (see _setup_crowd)
     crowd = _setup_crowd(simulator)
@@ -571,6 +610,11 @@ def main():
     if created is None:
         return
     tw, robot = created
+
+    # register the pedestrian geoms so the depth-camera perception tracks them
+    # (each pedestrian mocap body carries a geom named "<ped.name>_geom")
+    if PEDESTRIAN_SENSOR_DATA:
+        robot.set_obstacle_geoms([f"{p.name}_geom" for p in crowd.peds])
 
     # fixed footstep plan (only used when REACTIVE is False; the reactive planner
     # is created inside the loop and generates its footsteps online from v_cmd)

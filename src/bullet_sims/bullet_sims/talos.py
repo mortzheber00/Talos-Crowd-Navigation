@@ -1,6 +1,5 @@
 import numpy as np
 import pinocchio as pin
-import pybullet as pb
 
 # simulator
 from simulator.robot import Robot
@@ -63,7 +62,7 @@ class Talos:
             self.conf.lf_frame_name: "leg_left_6_joint",
         }
         for ankle_joint in self._ft_joint.values():
-            pb.enableJointForceTorqueSensor(
+            self.sim.enableJointForceTorqueSensor(
                 self.robot.id(), self.robot.jointNameIndexMap()[ankle_joint], True
             )
         ########################################################################
@@ -262,8 +261,8 @@ class Talos:
         # the sole_fix joint carries no force; read the ankle joint instead
         joint_id = self.robot.jointNameIndexMap()[self._ft_joint[frame_name]]
         # PyBullet reports the constraint reaction wrench, negate to get the contact wrench
-        wrench_local = -np.array(pb.getJointState(self.robot.id(), joint_id)[2])
-        ls = pb.getLinkState(self.robot.id(), joint_id, computeForwardKinematics=True)
+        wrench_local = -np.array(self.sim.getJointState(self.robot.id(), joint_id)[2])
+        ls = self.sim.getLinkState(self.robot.id(), joint_id, computeForwardKinematics=True)
         H_w_ankle = pin.XYZQUATToSE3(np.array(list(ls[0]) + list(ls[1])))
         # act() transfers the moment to the world origin, so the downstream ZMP
         # formula uses d=0 (the ankle height is absorbed here)

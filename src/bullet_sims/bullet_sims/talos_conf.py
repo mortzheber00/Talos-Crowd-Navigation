@@ -1,21 +1,17 @@
 import os
 import pinocchio as pin
 import numpy as np
-import rospkg
 
 ################################################################################
 # robot
 # Note: no_hands = 30 dof (7 per arm)
 ################################################################################
 
-rospack = rospkg.RosPack()
-try:
-    talos_description = rospack.get_path('talos_description')
-except:
-    # fallback if workspace not sourced: assume relative path from this file
-    config_dir = os.path.dirname(os.path.abspath(__file__))
-    ws_root = os.path.dirname(os.path.dirname(os.path.dirname(config_dir)))
-    talos_description = os.path.join(ws_root, 'src', 'talos_description')
+# Locate the installed talos_description package via the ROS 2 ament index.
+# (The old rospkg lookup is ROS 1 only and always failed under ROS 2, which
+# sent us into a broken fallback path pointing inside install/bullet_sims/lib.)
+from ament_index_python.packages import get_package_share_directory
+talos_description = get_package_share_directory('talos_description')
 
 urdf = os.path.join(talos_description, "robots/talos_reduced_no_hands.urdf")
 path = os.path.join(talos_description, "meshes/../..")
@@ -74,9 +70,10 @@ base_frame_name = "base_link"               # base link
 # Task weights
 w_com = 1e1             # weight of center of mass task
 w_am = 1e-4             # weight of angular momentum task
-w_foot = 1e-1           # weight of the foot motion task: here no motion
+w_foot = 5e0            # weight of the swing-foot motion task (walking needs real tracking)
 w_hand = 1e-1           # weight of the hand motion task
-w_torso = 1             # weight torso orientation motion task
+w_torso = 4             # weight torso orientation task (raised from 1 so the trunk
+                        # actively steers the heading through turns instead of lagging)
 w_feet_contact = 1e5    # weight of foot in contact (negative means infinite weight)
 w_hand_contact = 1e5    # weight for hand in contact
 w_posture = 1e-3        # weight of joint posture task
@@ -86,11 +83,13 @@ w_joint_bounds = 0.0    # weight of the velocity bounds: here no bounds
 
 # weights
 kp_contact = 10.0       # proportional gain of contact constraint
-kp_foot = 10.0          # proportional gain of contact constraint
+kp_foot = 150.0         # proportional gain of swing-foot motion task (was 10: too soft to
+                        # place the foot within a step -> foot mistracks -> capture-point fall)
 kp_hand = 10.0          # proportional gain of hand constraint
 kp_hand_rh = 10.0  
 kp_hand_lh = 10.0
-kp_torso = 10.0         # proportional gain of torso constraint
+kp_torso = 20.0         # proportional gain of torso task (raised from 10 to track the
+                        # commanded heading more tightly during turns)
 kp_com = 10.0           # proportional gain of com task
 kp_am = 10.0            # proportional gain of angular momentum task
 
@@ -106,7 +105,7 @@ kp_posture = np.array([
 masks_posture = np.ones(na)                     # mask out joint (here none)
 
 tau_max_scaling = 1.45          # scaling factor of torque bounds
-v_max_scaling = 0.8             # scaling velocity bounds
+v_max_scaling = 1.8             # scaling velocity bounds
 
 ################################################################################
 # walking

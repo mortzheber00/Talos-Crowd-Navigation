@@ -404,6 +404,8 @@ class TSIDWrapper:
         self.contact_RF_active = True
         self.motion_RH_active = False
         self.motion_LH_active = False
+        self.motion_RF_active = False 
+        self.motion_LF_active = False 
         
         self.sol = None
         self.tau = np.zeros(self.robot.na)
@@ -689,6 +691,16 @@ class TSIDWrapper:
             self.formulation.removeTask("task-right-hand", transition_time)
             self.motion_RH_active = False
 
+    def remove_motion_LF(self, transition_time=0.0):
+        if self.motion_LF_active:
+            self.formulation.removeTask("task-left-foot", transition_time)
+            self.motion_LF_active = False
+
+    def remove_motion_RF(self, transition_time=0.0):
+        if self.motion_RF_active:
+            self.formulation.removeTask("task-right-foot", transition_time)
+            self.motion_RF_active = False
+
     def add_motion_LH(self, transition_time=0.0):
         if not self.motion_LH_active:
             H_lh_ref = self.robot.framePosition(self.formulation.data(), self.LH)
@@ -706,6 +718,24 @@ class TSIDWrapper:
             self.formulation.addMotionTask(
                 self.rightHandTask, self.conf.w_hand, 1, transition_time)
             self.motion_RH_active = True
+
+    def add_motion_LF(self, transition_time=0.0):
+        if not self.motion_LF_active:
+            H_LF_ref = self.robot.framePosition(self.formulation.data(), self.LF)
+            update_sample(self.lf_ref, H_LF_ref)
+            self.leftFootTask.setReference(self.lf_ref)
+            self.formulation.addMotionTask(
+                self.leftFootTask, self.conf.w_foot, 1, transition_time)
+            self.motion_LF_active = True
+
+    def add_motion_RF(self, transition_time=0.0):
+        if not self.motion_RF_active:
+            H_RF_ref = self.robot.framePosition(self.formulation.data(), self.RF)
+            update_sample(self.rf_ref, H_RF_ref)
+            self.rightFootTask.setReference(self.rf_ref)
+            self.formulation.addMotionTask(
+                self.rightFootTask, self.conf.w_foot, 1, transition_time)
+            self.motion_RF_active = True
 
     ############################################################################
     # get forces

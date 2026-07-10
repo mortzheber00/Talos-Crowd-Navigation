@@ -131,7 +131,7 @@ during contact transitions, leading to unstable constraint handling and numerica
 
 An ORCA-driven pedestrian crowd simulated in MuJoCo. Each pedestrian is a
 kinematic disk (a mocap cylinder) that steers toward its goal while reciprocally
-avoiding the others via ORCA. Code lives in `src/bullet_sims/bullet_sims/crowd/`
+avoiding the others via ORCA. Code lives in `src/orca_nav/orca_nav/`
 (`orca.py`, `pedestrian.py`, `scenarios.py`) with a standalone viewer demo in
 `crowd_demo.py`.
 
@@ -139,14 +139,14 @@ avoiding the others via ORCA. Code lives in `src/bullet_sims/bullet_sims/crowd/`
 
 ```bash
 cd /workspaces/crowd_navigation/talos_crowd_navigation
-colcon build --packages-select bullet_sims
+colcon build --packages-select orca_nav
 source install/setup.bash
 
-ros2 run bullet_sims crowd_demo <scenario> [max_seconds]
+ros2 run orca_nav crowd_demo <scenario> [max_seconds]
 ```
 
 Scenarios: `head_on`, `crossing` (default), `circle`, `corridor`, `random`.
-Example: `ros2 run bullet_sims crowd_demo random 60`.
+Example: `ros2 run orca_nav crowd_demo random 60`.
 
 ### Adjustable parameters
 

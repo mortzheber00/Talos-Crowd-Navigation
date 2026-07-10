@@ -34,7 +34,7 @@ try:
 except ImportError:  # pragma: no cover - mujoco is provided by the sim env
     mujoco = None
 
-from bullet_sims.crowd.orca import orca_new_velocity, ORCAParams
+from orca_nav.orca import orca_new_velocity, ORCAParams
 
 
 class Pedestrian:

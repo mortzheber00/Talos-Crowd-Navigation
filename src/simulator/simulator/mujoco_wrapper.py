@@ -248,9 +248,18 @@ class MujocoWrapper:
             self._data = mujoco.MjData(self._model)
             mujoco.mj_forward(self._model, self._data)
             self._apply_pending_state()
-            if self._render:
+            # a full recompile (createBodyFromUrdf sets _model = None) also
+            # lands here with a viewer already open -- reuse it, a second
+            # launch_passive would race the first one inside GLFW (segfault)
+            if self._viewer is not None:
+                self._reload_viewer()
+            elif self._render:
                 self._open_viewer()
             self._dirty = False
+            # the model object was replaced -> any cached renderer is now stale
+            if self._renderer is not None:
+                self._renderer.close()
+                self._renderer = None
         elif self._dirty:
             # recompile in place, keeping the current state where possible
             self._model, self._data = self._spec.recompile(self._model, self._data)
@@ -262,12 +271,9 @@ class MujocoWrapper:
                 self._renderer = None
             # the passive viewer is bound to the *old* model/data objects, so
             # after a recompile (e.g. a camera was added) it would freeze on
-            # stale state -> re-launch it against the new model/data.
+            # stale state -> point it at the new model/data.
             if self._viewer is not None:
-                self._viewer.close()
-                self._viewer = None
-                if self._render:
-                    self._open_viewer()
+                self._reload_viewer()
 
     def _apply_pending_state(self):
         # placeholder hook: initial poses are applied through resetJointState /
@@ -279,6 +285,36 @@ class MujocoWrapper:
             self._render = False
             return
         self._viewer = mj_viewer.launch_passive(self._model, self._data)
+
+    def _reload_viewer(self):
+        """Load the recompiled model/data into the already-open passive viewer.
+
+        close() + launch_passive() would be the obvious move, but close() is
+        asynchronous: the old viewer's GLFW thread is still rendering/tearing
+        down while launch_passive() spins up a second thread that runs
+        glfw.init() and creates its own window -> the two threads race inside
+        GLFW/OpenGL and the process segfaults (observed in Simulate.load on
+        the new viewer's reload thread). Simulate.load on the *existing*
+        viewer is the same thread-safe path the GUI uses for drag&drop model
+        loading and it blocks until the render thread has swapped models, so
+        no second window/thread is ever created.
+        """
+        sim = None
+        try:
+            sim = self._viewer._sim()   # Handle stores only a weakref
+        except AttributeError:
+            pass
+        if sim is not None and self._viewer.is_running():
+            sim.load(self._model, self._data, '')
+        else:
+            # viewer window was closed (by the user) or the private API
+            # changed: fall back to a fresh launch, giving the old GLFW
+            # thread time to tear down completely first.
+            self._viewer.close()
+            self._viewer = None
+            if self._render:
+                time.sleep(1.0)
+                self._open_viewer()
 
     def setRealTime(self):
         self._sim_time_step = 1.0 / 240.0
@@ -326,6 +362,22 @@ class MujocoWrapper:
     def disconnect(self):
         if self._viewer is not None:
             self._viewer.close()
+            # close() is asynchronous (it only sets exitrequest): wait until
+            # the viewer thread has left its render loop and destroyed the
+            # window, otherwise the interpreter's atexit glfw.terminate()
+            # races the still-rendering thread and segfaults on shutdown.
+            # Once Simulate.destroy() has run, reading exitrequest raises --
+            # that is our completion signal.
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                try:
+                    sim = self._viewer._sim()
+                    if sim is None:
+                        break
+                    sim.exitrequest
+                except Exception:
+                    break
+                time.sleep(0.05)
             self._viewer = None
         self._running = False
 
@@ -1049,8 +1101,9 @@ class MujocoWrapper:
             # set the env var MUJOCO_GL=egl (GPU) or MUJOCO_GL=osmesa (CPU)
             # before the first render.
             self._renderer = mujoco.Renderer(self._model, height, width)
-            self._renderer.enable_depth_rendering()
 
+        # the renderer may have been left in another mode (segmentation)
+        self._renderer.enable_depth_rendering()
         self._renderer.update_scene(self._data, camera=self._cam_name)
         depth = self._renderer.render()          # float32 (H, W), metres
 
@@ -1058,6 +1111,62 @@ class MujocoWrapper:
         far = float(self._model.stat.extent * self._model.vis.map.zfar)
         depth = np.where(depth >= 0.999 * far, invalid_to, depth)
         return depth.astype(np.float32)
+
+    def get_depth_and_seg_image(self, invalid_to=np.nan):
+        """Render the onboard camera once and return the pixel-registered pair
+
+        * depth: ``(H, W)`` float32, metric eye-space z in metres (background
+          pixels replaced with ``invalid_to``)
+        * seg:   ``(H, W, 2)`` int32, per pixel ``(object id, object type)``
+          where the type is an ``mjtObj`` value (geoms: ``mjOBJ_GEOM``) and
+          background pixels are ``(-1, -1)``
+
+        Both images come from a single ``update_scene`` on the same renderer,
+        so they are guaranteed to be aligned pixel-for-pixel.
+        """
+        if self._cam_name is None:
+            raise RuntimeError(
+                "no camera configured -- call addCameraToLink(...) first")
+
+        self._ensure_compiled()
+
+        width, height = self._cam_wh
+        if self._renderer is None:
+            self._renderer = mujoco.Renderer(self._model, height, width)
+
+        self._renderer.update_scene(self._data, camera=self._cam_name)
+
+        self._renderer.enable_depth_rendering()
+        depth = self._renderer.render()          # float32 (H, W), metres
+        self._renderer.enable_segmentation_rendering()   # turns depth mode off
+        seg = self._renderer.render()            # int32 (H, W, 2), bg = (-1,-1)
+        self._renderer.disable_segmentation_rendering()
+
+        far = float(self._model.stat.extent * self._model.vis.map.zfar)
+        depth = np.where(depth >= 0.999 * far, invalid_to, depth)
+        return depth.astype(np.float32), seg
+
+    def get_camera_pose(self):
+        """World pose of the onboard camera as ``(pos (3,), R_world_cam (3,3))``.
+
+        The rotation follows the MuJoCo camera convention: the camera looks
+        along its local -Z axis with +Y as image-up. To convert to the ROS
+        optical convention (+Z forward, +Y down) negate the Y and Z columns.
+        """
+        if self._cam_name is None:
+            raise RuntimeError(
+                "no camera configured -- call addCameraToLink(...) first")
+        self._ensure_compiled()
+        cam_id = self._model.camera(self._cam_name).id
+        return (self._data.cam_xpos[cam_id].copy(),
+                self._data.cam_xmat[cam_id].reshape(3, 3).copy())
+
+    def getGeomId(self, name):
+        """Numeric geom id for a named geom (as it appears in segmentation
+        images). Ids are only valid for the current model: re-query after any
+        recompile instead of caching them across model changes."""
+        self._ensure_compiled()
+        return self._model.geom(name).id
 
     # ------------------------------------------------------------------ #
     # utility

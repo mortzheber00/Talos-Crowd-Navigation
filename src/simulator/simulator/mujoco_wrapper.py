@@ -248,9 +248,18 @@ class MujocoWrapper:
             self._data = mujoco.MjData(self._model)
             mujoco.mj_forward(self._model, self._data)
             self._apply_pending_state()
-            if self._render:
+            # a full recompile (createBodyFromUrdf sets _model = None) also
+            # lands here with a viewer already open -- reuse it, a second
+            # launch_passive would race the first one inside GLFW (segfault)
+            if self._viewer is not None:
+                self._reload_viewer()
+            elif self._render:
                 self._open_viewer()
             self._dirty = False
+            # the model object was replaced -> any cached renderer is now stale
+            if self._renderer is not None:
+                self._renderer.close()
+                self._renderer = None
         elif self._dirty:
             # recompile in place, keeping the current state where possible
             self._model, self._data = self._spec.recompile(self._model, self._data)
@@ -262,12 +271,9 @@ class MujocoWrapper:
                 self._renderer = None
             # the passive viewer is bound to the *old* model/data objects, so
             # after a recompile (e.g. a camera was added) it would freeze on
-            # stale state -> re-launch it against the new model/data.
+            # stale state -> point it at the new model/data.
             if self._viewer is not None:
-                self._viewer.close()
-                self._viewer = None
-                if self._render:
-                    self._open_viewer()
+                self._reload_viewer()
 
     def _apply_pending_state(self):
         # placeholder hook: initial poses are applied through resetJointState /
@@ -279,6 +285,36 @@ class MujocoWrapper:
             self._render = False
             return
         self._viewer = mj_viewer.launch_passive(self._model, self._data)
+
+    def _reload_viewer(self):
+        """Load the recompiled model/data into the already-open passive viewer.
+
+        close() + launch_passive() would be the obvious move, but close() is
+        asynchronous: the old viewer's GLFW thread is still rendering/tearing
+        down while launch_passive() spins up a second thread that runs
+        glfw.init() and creates its own window -> the two threads race inside
+        GLFW/OpenGL and the process segfaults (observed in Simulate.load on
+        the new viewer's reload thread). Simulate.load on the *existing*
+        viewer is the same thread-safe path the GUI uses for drag&drop model
+        loading and it blocks until the render thread has swapped models, so
+        no second window/thread is ever created.
+        """
+        sim = None
+        try:
+            sim = self._viewer._sim()   # Handle stores only a weakref
+        except AttributeError:
+            pass
+        if sim is not None and self._viewer.is_running():
+            sim.load(self._model, self._data, '')
+        else:
+            # viewer window was closed (by the user) or the private API
+            # changed: fall back to a fresh launch, giving the old GLFW
+            # thread time to tear down completely first.
+            self._viewer.close()
+            self._viewer = None
+            if self._render:
+                time.sleep(1.0)
+                self._open_viewer()
 
     def setRealTime(self):
         self._sim_time_step = 1.0 / 240.0
@@ -326,6 +362,22 @@ class MujocoWrapper:
     def disconnect(self):
         if self._viewer is not None:
             self._viewer.close()
+            # close() is asynchronous (it only sets exitrequest): wait until
+            # the viewer thread has left its render loop and destroyed the
+            # window, otherwise the interpreter's atexit glfw.terminate()
+            # races the still-rendering thread and segfaults on shutdown.
+            # Once Simulate.destroy() has run, reading exitrequest raises --
+            # that is our completion signal.
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                try:
+                    sim = self._viewer._sim()
+                    if sim is None:
+                        break
+                    sim.exitrequest
+                except Exception:
+                    break
+                time.sleep(0.05)
             self._viewer = None
         self._running = False
 

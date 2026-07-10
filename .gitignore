@@ -16,5 +16,8 @@ __pycache__/
 *.mcap
 *.log
 
-# Devcontainer (may ne OS specific)
+# Devcontainer (may be OS specific)
 .devcontainer/
+
+# mac os bullshit 
+.DS_Store

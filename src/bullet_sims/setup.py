@@ -34,7 +34,7 @@ setup(
             't51= bullet_sims.t51:main',
             't52= bullet_sims.t52:main',
             'walking= bullet_sims.walking:main',
-
+            'stand_and_perceive= bullet_sims.stand_and_perceive:main',
         ],
     },
 )

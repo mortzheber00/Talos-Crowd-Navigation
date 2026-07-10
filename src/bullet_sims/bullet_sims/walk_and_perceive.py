@@ -21,6 +21,7 @@ import bullet_sims.talos_conf as conf
 
 # crowd + perception (from stand_and_perceive)
 from bullet_sims.crowd_env import CrowdEnv
+from bullet_sims.transit_hub_env import TransitHubEnv
 
 # walking pipeline: reuse walking.py's setup/plan/mpc/logging/plotting helpers
 from bullet_sims.footstep_planner import Side, other_foot_id
@@ -156,7 +157,7 @@ def main():
 
     # Crowd MUST be created before the robot (spawning cylinder bodies forces a
     # MuJoCo recompile that would otherwise wipe the robot's pose).
-    crowd = CrowdEnv(simulator)
+    crowd = TransitHubEnv(simulator)
 
     created = _create_robot(simulator)
     if created is None:

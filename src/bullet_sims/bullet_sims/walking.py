@@ -29,10 +29,14 @@ from orca_nav import scenarios
 from orca_nav.pedestrian import PedestrianSimulator
 
 
-# footstep path for the walking demo: "line" (straight) or "circle" (turning test)
-WALK_MODE = "öine"
-CIRCLE_RADIUS = 4.5       # [m] radius of the centre path when WALK_MODE == "circle"
-CIRCLE_CLOCKWISE = False   # False = turn left/CCW, True = turn right/CW
+# footstep path for the walking demo: "line" (straight) or "circle" (curved)
+WALK_MODE = "circle"
+CIRCLE_RADIUS = 1.5     # [m] radius of the centre path when WALK_MODE == "circle"
+CIRCLE_CLOCKWISE = False   # False = curve left/CCW, True = curve right/CW
+# False = omnidirectional (fixed facing, side-steps along the curve) -> robust: reuses
+#         the straight-line gait, no body rotation, best for bounded curves (avoidance).
+# True  = turn the whole body to face the path -> more natural, harder to stabilise.
+CIRCLE_FACE_PATH = False
 
 
 ################################################################################
@@ -89,7 +93,8 @@ def _build_plan(robot):
     T_support_w = robot.supportFootPose()
     if WALK_MODE == "circle":
         plan = planner.planCircle(T_support_w, robot.support_foot, no_steps=no_steps,
-                                  radius=CIRCLE_RADIUS, clockwise=CIRCLE_CLOCKWISE)
+                                  radius=CIRCLE_RADIUS, clockwise=CIRCLE_CLOCKWISE,
+                                  face_path=CIRCLE_FACE_PATH)
     else:
         plan = planner.planLine(T_support_w, robot.support_foot, no_steps=no_steps)
     plan.append(plan[-2])

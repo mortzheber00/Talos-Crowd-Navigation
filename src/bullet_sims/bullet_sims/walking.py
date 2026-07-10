@@ -25,8 +25,8 @@ from bullet_sims.talos import Talos
 from bullet_sims.lip_mpc import LIPMPC, LIPInterpolator, generate_zmp_reference, generate_yaw_reference
 
 # crowd
-from bullet_sims.crowd.pedestrian import PedestrianSimulator
-from bullet_sims.crowd import scenarios
+from orca_nav import scenarios
+from orca_nav.pedestrian import PedestrianSimulator
 
 
 # footstep path for the walking demo: "line" (straight) or "circle" (turning test)

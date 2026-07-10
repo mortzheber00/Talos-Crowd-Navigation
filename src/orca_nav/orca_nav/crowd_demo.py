@@ -3,12 +3,12 @@ Standalone demo of the ORCA pedestrian crowd in the MuJoCo simulator — no robo
 
 Run (from the workspace root, after building + sourcing):
 
-    ros2 run bullet_sims crowd_demo                # default scenario: crossing
-    ros2 run bullet_sims crowd_demo circle
-    ros2 run bullet_sims crowd_demo random
-    ros2 run bullet_sims crowd_demo corridor 60    # scenario + max seconds
+    ros2 run orca_nav crowd_demo                # default scenario: crossing
+    ros2 run orca_nav crowd_demo circle
+    ros2 run orca_nav crowd_demo random
+    ros2 run orca_nav crowd_demo corridor 60    # scenario + max seconds
 
-Scenarios: head_on, crossing, circle, corridor, random (see crowd/scenarios.py).
+Scenarios: head_on, crossing, circle, corridor, random (see scenarios.py).
 Each pedestrian is a coloured disk (cylinder). A small matching marker on the
 floor shows its goal. Pedestrians steer with ORCA and reverse start<->goal on
 arrival, so the crowd keeps moving.
@@ -21,15 +21,15 @@ import mujoco
 import numpy as np
 
 from simulator.mujoco_wrapper import MujocoWrapper
-from bullet_sims.crowd.pedestrian import PedestrianSimulator
-from bullet_sims.crowd import scenarios
+from orca_nav.pedestrian import PedestrianSimulator
+from orca_nav import scenarios
 
 
 def _add_goal_markers(sim, crowd):
     """Add a small, flat, visual-only disk at each pedestrian goal (same colour)."""
     for ped in crowd.peds:
         color = list(ped.color[:3]) + [0.4]
-        g = sim._spec.worldbody.add_geom(
+        sim._spec.worldbody.add_geom(
             name=f"{ped.name}_goal",
             type=mujoco.mjtGeom.mjGEOM_CYLINDER,
             size=[ped.radius, 0.01, 0.0],
@@ -62,8 +62,6 @@ def main():
 
     while sim.isRunning() and sim.simTime() < max_seconds:
         crowd.update(dt)
-        states=crowd.states()
-        print(f"states: {states}")
         sim.step()
 
         worst = min(worst, crowd.min_separation())

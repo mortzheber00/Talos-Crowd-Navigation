@@ -27,6 +27,8 @@ from bullet_sims.lip_mpc import LIPMPC, LIPInterpolator, generate_zmp_reference,
 # crowd
 from bullet_sims.crowd.pedestrian import PedestrianSimulator
 from bullet_sims.crowd import scenarios
+from bullet_sims.robot_orca import RobotORCA
+from bullet_sims import debug_viz
 
 
 # footstep path for the walking demo: "line" (straight) or "circle" (curved)
@@ -37,6 +39,11 @@ CIRCLE_CLOCKWISE = False   # False = curve left/CCW, True = curve right/CW
 #         the straight-line gait, no body rotation, best for bounded curves (avoidance).
 # True  = turn the whole body to face the path -> more natural, harder to stabilise.
 CIRCLE_FACE_PATH = False
+
+# robot ORCA velocity (debug): the goal it heads toward, and the arrow display scale.
+# The v_cmd is only visualized here (green arrow); it does not yet drive the footsteps.
+ROBOT_GOAL = (4.0, 0.0)    # world (x, y) navigation goal
+ARROW_SCALE = 3.0          # visual stretch so the slow v_cmd arrow is visible
 
 
 ################################################################################
@@ -305,6 +312,10 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     heading_des = yaw_sup0                      # desired heading = current step target yaw
     TORSO_YAW_LP = 0.05                         # low-pass gain per sim step
 
+    # robot ORCA velocity generator (debug visualization only for now)
+    robot_ctrl = RobotORCA(ROBOT_GOAL, radius=0.35, max_speed=0.4,
+                           desired_speed=0.25, safety_margin=0.2)
+
     for i in range(-N_pre, N_sim):
         t = i * conf.dt
         dt = conf.dt
@@ -372,7 +383,21 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         # robot_radius inflated as a safety margin
         crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
         ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
-        # TODO: update the robot with the crowd states, e.g. for a reactive avoidance layer
+
+        # robot ORCA velocity command. Only visualized for now (green = collision-free
+        # v_cmd, blue = preferred/goal direction); it does not yet drive the footsteps.
+        v_cmd = robot_ctrl.compute_velocity(com[:2], vcom[:2], ped_states)
+        v_pref = robot_ctrl.preferred_velocity(com[:2])
+        arrows = [a for a in (
+            debug_viz.velocity_arrow(com[:2], v_pref, z=float(com[2]),
+                                     scale=ARROW_SCALE, rgba=(0.3, 0.5, 1.0, 0.6)),
+            debug_viz.velocity_arrow(com[:2], v_cmd, z=float(com[2]),
+                                     scale=ARROW_SCALE, rgba=(0.1, 0.9, 0.1, 1.0)),
+        ) if a is not None]
+        # red sphere at the navigation goal
+        goal_marker = debug_viz.point_marker(ROBOT_GOAL, z=0.15, radius=0.12,
+                                             rgba=(1.0, 0.2, 0.2, 1.0))
+        debug_viz.draw_scene(simulator, arrows=arrows, points=[goal_marker])
 
         # --- advance the simulation + whole-body control ---
         simulator.step()

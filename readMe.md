@@ -189,6 +189,42 @@ The two parameters that most change the feel of the crowd are `radius` /
 `personal_space` (how much space pedestrians demand) and `time_horizon` (how far
 ahead they plan — high looks polite and anticipatory, low looks last-second).
 
+## Curved Walking
+
+The walking demo (`ros2 run bullet_sims walking`) can follow a curved path instead
+of a straight line. Configure it with the constants at the top of
+`src/bullet_sims/bullet_sims/walking.py`:
+
+- `WALK_MODE` — `"line"` (straight) or `"circle"` (curved).
+- `CIRCLE_RADIUS` — radius of the curved centre path [m]. Larger = gentler curve.
+- `CIRCLE_CLOCKWISE` — `False` = curve left/CCW, `True` = curve right/CW.
+- `CIRCLE_FACE_PATH` — how the robot follows the curve (see below).
+
+### `CIRCLE_FACE_PATH`
+
+This is the important one — it selects *how* the robot negotiates the curve:
+
+**`False` (default, omnidirectional / recommended).** The feet keep a fixed
+forward-facing orientation and the robot *side-steps* along the curved path
+without rotating its body. Because the feet stay axis-aligned, the yaw-dependent
+machinery (swing-foot yaw, the rotated ZMP box, torso steering) stays dormant and
+the robot uses the **proven straight-line gait**. No body rotation means nothing
+to destabilise, so this is robust. It is the right mode for **bounded curves such
+as obstacle avoidance** (deviate ~20–30° and return). Its only limit: on a long,
+same-direction arc the steps become increasingly sideways, so keep the curve
+bounded (raise `CIRCLE_RADIUS` or lower the step count for long arcs).
+
+**`True` (body turning).** Each footstep is yawed to face the direction of travel,
+so the robot turns its whole body around the curve. This looks more natural and is
+needed for sustained turning (e.g. a full circle), but rotating a biped's body
+mid-gait is much harder to stabilise — it relies on the swing-foot yaw tracking,
+the foot-frame ZMP box, and the torso actively steering the heading, and it can
+still topple on tight or long turns. Use only if you specifically need the body to
+face along the path.
+
+For crowd navigation the reactive footstep layer only needs bounded curves, so
+`CIRCLE_FACE_PATH = False` is the intended mode.
+
 ## Group members final project:
 Lara Heidtmann , Florian Bohnes, Sebastián Serna, Moritz Heber, Nicolas Guenther
 

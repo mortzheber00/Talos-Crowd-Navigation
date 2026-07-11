@@ -23,10 +23,17 @@ from bullet_sims.footstep_planner import Side, FootStepPlanner, FootStep, other_
 from bullet_sims.foot_trajectory import SwingFootTrajectory
 from bullet_sims.talos import Talos
 from bullet_sims.lip_mpc import LIPMPC, LIPInterpolator, generate_zmp_reference, generate_yaw_reference
+from bullet_sims.reactive_footstep_planner import ReactiveFootStepPlanner
+
+# crowd
+from orca_nav.robot_orca import RobotORCA
+from orca_nav import debug_viz
 
 # crowd
 from orca_nav import scenarios
 from orca_nav.pedestrian import PedestrianSimulator
+
+
 
 
 # footstep path for the walking demo: "line" (straight) or "circle" (curved)
@@ -37,6 +44,18 @@ CIRCLE_CLOCKWISE = False   # False = curve left/CCW, True = curve right/CW
 #         the straight-line gait, no body rotation, best for bounded curves (avoidance).
 # True  = turn the whole body to face the path -> more natural, harder to stabilise.
 CIRCLE_FACE_PATH = False
+
+# robot navigation: goal it heads toward, and the arrow display scale.
+# v_cmd (from ORCA) now DRIVES the reactive footstep planner; green arrow = v_cmd.
+ROBOT_GOAL = (4.0, 0.0)    # world (x, y) navigation goal
+ARROW_SCALE = 3.0          # visual stretch so the slow v_cmd arrow is visible
+WALK_DURATION = 30.0       # [s] max walk time (reactive walking has no fixed step count)
+REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MODE plan
+
+# ---- runtime parameters (defaults; override at launch via ROS 2 params, e.g.
+#   ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=true )
+SCENARIO = "random"              # crowd scenario: head_on | crossing | circle | corridor | random
+PEDESTRIAN_SENSOR_DATA = False   # True: depth-camera perception; False: ground-truth states
 
 
 ################################################################################
@@ -67,7 +86,7 @@ def _setup_crowd(simulator):
     """
     crowd = PedestrianSimulator(simulator, radius=0.3, max_speed=1.3,
                                 pref_perturb=0.05, personal_space=0.3)
-    scenarios.build(crowd, "crossing")
+    scenarios.build(crowd, SCENARIO)
     return crowd
 
 
@@ -121,12 +140,21 @@ def _setup_lip_mpc(robot):
 # logging
 ################################################################################
 
-def _allocate_logs(N_sim):
+def _allocate_logs(N_sim, n_peds=0):
     """Allocate all per-iteration log buffers as NaN-filled arrays."""
     def nan(*shape):
         return np.nan * np.empty(shape if len(shape) > 1 else shape[0])
 
     return SimpleNamespace(
+        # --- crowd navigation ---
+        ROBOT_XY=nan(N_sim, 2),                 # robot CoM ground path
+        PED_XY=nan(N_sim, max(n_peds, 1), 2),   # pedestrian ground paths
+        MIN_SEP=nan(N_sim),                     # robot<->nearest-ped surface gap [m]
+        DIST_GOAL=nan(N_sim),                   # robot distance to goal [m]
+        VCMD=nan(N_sim, 2),                     # ORCA velocity command
+        VPREF=nan(N_sim, 2),                    # goal-direction preferred velocity
+        GOAL=np.asarray((0.0, 0.0)),            # filled in _run_loop
+        PED_RADII=np.zeros(max(n_peds, 1)),     # filled in _run_loop
         # CoM position/velocity/acceleration: reference (LIP), pinocchio, pybullet
         COM_POS_REF=nan(N_sim, 3), COM_VEL_REF=nan(N_sim, 3), COM_ACC_REF=nan(N_sim, 3),
         COM_POS_PIN=nan(N_sim, 3), COM_VEL_PIN=nan(N_sim, 3), COM_ACC_PIN=nan(N_sim, 3),
@@ -262,15 +290,86 @@ def _plot_results(L):
         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plots', 'T7'))
     try:
         os.makedirs(plots_dir, exist_ok=True)
-        out_path = os.path.join(plots_dir, 'walking_results.png')
+        out_path = os.path.join(plots_dir, 'walking_results_random.png')
         fig.savefig(out_path, dpi=150)
         print(f"saved plots to {out_path}")
     except OSError as e:
         print(f"could not save plots to {plots_dir}: {e}")
+    # Only pop up a (blocking) window if explicitly requested; otherwise just save.
+    # Interactive windows can be un-closeable over VNC, so default to save-only.
+    if os.environ.get('WALKING_SHOW_PLOTS'):
+        try:
+            plt.show()
+        except Exception as e:
+            print(f"could not show plots: {e}")
+    else:
+        plt.close(fig)
+
+
+def _plot_navigation(L):
+    """Crowd-navigation plots: top-down trajectory and the robot<->nearest-ped gap
+    (plus goal progress and command speed)."""
+    import os
+    import matplotlib.pyplot as plt
+
+    fig, axd = plt.subplot_mosaic([['traj', 'sep'],
+                                   ['traj', 'prog']], figsize=(14, 7))
+
+    # --- top-down trajectory ---
+    ax = axd['traj']
+    n_peds = L.PED_XY.shape[1]
+    for j in range(n_peds):
+        ax.plot(L.PED_XY[:, j, 0], L.PED_XY[:, j, 1], '-', lw=1.0, alpha=0.5,
+                color='tab:gray', label='pedestrians' if j == 0 else None)
+    ax.plot(L.ROBOT_XY[:, 0], L.ROBOT_XY[:, 1], '-', lw=2.5, color='tab:green',
+            label='robot')
+    # start (first non-nan robot sample) and goal
+    valid = np.where(~np.isnan(L.ROBOT_XY[:, 0]))[0]
+    if len(valid):
+        s = L.ROBOT_XY[valid[0]]
+        ax.plot(s[0], s[1], 'o', color='tab:green', ms=9, label='start')
+    ax.plot(L.GOAL[0], L.GOAL[1], '*', color='tab:red', ms=16, label='goal')
+    ax.set_title('Top-down trajectory')
+    ax.set_xlabel('x [m]'); ax.set_ylabel('y [m]')
+    ax.set_aspect('equal', adjustable='datalim')
+    ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+
+    # --- robot <-> nearest pedestrian surface gap (safety) ---
+    ax = axd['sep']
+    ax.plot(L.TIME, L.MIN_SEP, color='tab:blue')
+    ax.axhline(0.0, color='tab:red', ls='--', lw=1, label='contact (gap=0)')
+    ax.set_title('Distance to nearest pedestrian (surface gap)')
+    ax.set_ylabel('gap [m]'); ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+
+    # --- progress to goal + command speed ---
+    ax = axd['prog']
+    ax.plot(L.TIME, L.DIST_GOAL, color='tab:purple', label='distance to goal')
+    ax.set_ylabel('dist to goal [m]', color='tab:purple')
+    ax.set_xlabel('t [s]'); ax.grid(True, alpha=0.3)
+    ax2 = ax.twinx()
+    speed = np.hypot(L.VCMD[:, 0], L.VCMD[:, 1])
+    ax2.plot(L.TIME, speed, color='tab:orange', lw=1, label='|v_cmd|')
+    ax2.set_ylabel('|v_cmd| [m/s]', color='tab:orange')
+    ax.set_title('Goal progress and command speed')
+
+    fig.tight_layout()
+    plots_dir = os.environ.get(
+        'WALKING_PLOTS_DIR',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plots', 'T7'))
     try:
-        plt.show()
-    except Exception as e:
-        print(f"could not show plots: {e}")
+        os.makedirs(plots_dir, exist_ok=True)
+        out_path = os.path.join(plots_dir, 'navigation_results_random.png')
+        fig.savefig(out_path, dpi=150)
+        print(f"saved navigation plots to {out_path}")
+    except OSError as e:
+        print(f"could not save navigation plots to {plots_dir}: {e}")
+    if os.environ.get('WALKING_SHOW_PLOTS'):
+        try:
+            plt.show()
+        except Exception as e:
+            print(f"could not show navigation plots: {e}")
+    else:
+        plt.close(fig)
 
 
 ################################################################################
@@ -280,14 +379,20 @@ def _plot_results(L):
 def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref,
               com_start, com_target, N_pre, N_sim):
     """Run the walking simulation loop and return the filled log buffers."""
-    L = _allocate_logs(N_sim)
+    ROBOT_RADIUS_PHYS = 0.3                     # physical robot radius for the safety plot
+    n_peds = len(crowd.peds)
+    L = _allocate_logs(N_sim, n_peds)
+    L.GOAL = np.asarray(ROBOT_GOAL, dtype=float)
+    L.PED_RADII = np.array([r for (_, _, r) in crowd.states()])
 
-    k = 0                                       # current MPC index
-    plan_idx = 1                                # current step index in the plan
+    k = 0                                       # MPC index (fixed-plan mode)
+    plan_idx = 1                                # step index in the plan (fixed-plan mode)
+    mpc_phase = 0                               # MPC-sample index within the current step
     t_step_elapsed = 0.0                        # elapsed time within current step
     t_publish = 0.0                             # last ros publish time
     u_k = np.zeros(2)                           # held mpc control (commanded zmp)
     swing_trajectory = None                     # current swing-foot spline
+    next_step = None                            # current swing-target footstep (for viz)
     pin_data = robot.stack.model.createData()   # scratch for centroidal queries
     c = c_dot = c_ddot = None                   # latest com reference
 
@@ -305,37 +410,112 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     heading_des = yaw_sup0                      # desired heading = current step target yaw
     TORSO_YAW_LP = 0.05                         # low-pass gain per sim step
 
+    # robot ORCA velocity generator: v_cmd toward the goal, avoiding pedestrians
+    robot_ctrl = RobotORCA(ROBOT_GOAL, radius=0.35, max_speed=0.4,
+                           desired_speed=0.25, safety_margin=0.2)
+
+    # reactive footstep planner: each step, places the next footstep in the
+    # direction of v_cmd (omnidirectional / fixed facing) and feeds the MPC.
+    reactive_planner = ReactiveFootStepPlanner(
+        conf, ROBOT_GOAL, robot.supportFootPose(),
+        conf.no_mpc_samples_per_step, conf.no_mpc_samples_per_horizon)
+    current_swing_side = robot.swing_foot        # which foot swings next
+    reactive_planner.regenerate(
+        reactive_planner.make_footstep(robot.supportFootPose(), robot.support_foot),
+        np.zeros(2))                             # seed the buffer until the first step
+
     for i in range(-N_pre, N_sim):
         t = i * conf.dt
         dt = conf.dt
 
-        # --- update the mpc every no_sim_per_mpc steps ---
-        if i >= 0 and i % conf.no_sim_per_mpc == 0:
-            x_k = interpolator.x
-            ZMP_ref_k = ZMP_ref[k:k + conf.no_mpc_samples_per_horizon]
-            YAW_ref_k = YAW_ref[k:k + conf.no_mpc_samples_per_horizon]
-            # apply the terminal constraint once the remaining reference is
-            # shorter than a full horizon (the duplicated footsteps keep this
-            # slice in bounds)
-            remaining = len(ZMP_ref) - k
-            terminal_idx = remaining - 1 if remaining < conf.no_mpc_samples_per_horizon else -1
-            u_k = mpc.buildSolveOCP(x_k, ZMP_ref_k, terminal_idx, yaw_ref_k=YAW_ref_k)
-            k += 1
+        # --- robot state + crowd + ORCA velocity command (first, so the reactive
+        #     planner can use the latest v_cmd) ---
+        body_id = robot.robot.id()
+        com = simulator.computeComPosition(body_id)
+        vcom = simulator.computeComVelocity(body_id)
+        # move the crowd (pedestrians still avoid the robot via ground-truth here)
+        crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
+        # pedestrian states for the robot come from the ONBOARD DEPTH CAMERA
+        # (only what the robot actually sees), not ground truth. update_obstacles()
+        # refreshes these at the perception rate; obstacles2d() returns the latest
+        # world-frame estimates {id, x, y, r, vx, vy, stale}.
+        if PEDESTRIAN_SENSOR_DATA:
+            ped_states = [(np.array([o['x'], o['y']]), np.array([o['vx'], o['vy']]), o['r'])
+                          for o in robot.obstacles2d()]
+        else:
+            ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
+        v_cmd = robot_ctrl.compute_velocity(com[:2], vcom[:2], ped_states)
+        v_pref = robot_ctrl.preferred_velocity(com[:2])
 
-        # --- step transition: build the next swing-foot spline ---
+        # --- navigation logging ---
+        if i >= 0:
+            L.ROBOT_XY[i] = com[:2]
+            for j, (p, _, r) in enumerate(ped_states):
+                L.PED_XY[i, j] = np.asarray(p, dtype=float)[:2]
+            gaps = [np.hypot(*(com[:2] - np.asarray(p, float)[:2])) - ROBOT_RADIUS_PHYS - r
+                    for (p, _, r) in ped_states]
+            L.MIN_SEP[i] = min(gaps) if gaps else np.nan
+            L.DIST_GOAL[i] = float(np.hypot(*(L.GOAL - com[:2])))
+            L.VCMD[i] = v_cmd
+            L.VPREF[i] = v_pref
+
+        # debug overlay: green = v_cmd (drives the footsteps), blue = goal direction,
+        # red sphere = goal
+        arrows = [a for a in (
+            debug_viz.velocity_arrow(com[:2], v_pref, z=float(com[2]),
+                                     scale=ARROW_SCALE, rgba=(0.3, 0.5, 1.0, 0.6)),
+            debug_viz.velocity_arrow(com[:2], v_cmd, z=float(com[2]),
+                                     scale=ARROW_SCALE, rgba=(0.1, 0.9, 0.1, 1.0)),
+        ) if a is not None]
+        goal_marker = debug_viz.point_marker(ROBOT_GOAL, z=0.15, radius=0.12,
+                                             rgba=(1.0, 0.2, 0.2, 1.0))
+        # yellow foot-shaped box at the next planned footstep
+        boxes = [debug_viz.footstep_box(next_step)] if next_step is not None else []
+        debug_viz.draw_scene(simulator, arrows=arrows, points=[goal_marker], boxes=boxes)
+
+        # --- step transition: pick/plan the next footstep, build swing spline ---
         if i >= 0 and i % conf.no_sim_per_step == 0:
-            next_step = plan[plan_idx]
-            robot.setSwingFoot(next_step.side)
-            robot.setSupportFoot(other_foot_id(next_step.side))
+            if REACTIVE:
+                # plan the next step in the direction of v_cmd (steps in place at goal)
+                swing_side = current_swing_side
+                support_side = other_foot_id(swing_side)
+                robot.setSwingFoot(swing_side)
+                robot.setSupportFoot(support_side)
+                support_fs = reactive_planner.make_footstep(
+                    robot.supportFootPose(), support_side)
+                at_goal = reactive_planner.at_goal(com[:2])
+                reactive_planner.regenerate(support_fs, v_cmd, at_goal)
+                next_step = reactive_planner.swing_target()
+                current_swing_side = other_foot_id(swing_side)
+                mpc_phase = 0
+            else:
+                next_step = plan[plan_idx]
+                robot.setSwingFoot(next_step.side)
+                robot.setSupportFoot(other_foot_id(next_step.side))
+                plan_idx += 1
             T0_swing = robot.swingFootPose()
             T1_swing = next_step.poseInWorld()
             swing_trajectory = SwingFootTrajectory(T0_swing, T1_swing, conf.step_dur)
             t_step_elapsed = 0.0
-            plan_idx += 1
-            # desired body heading = the yaw of the step we are stepping to; this
-            # LEADS the turn instead of lagging behind the planted foot
             heading_des = np.arctan2(next_step.pose.rotation[1, 0],
                                      next_step.pose.rotation[0, 0])
+
+        # --- update the mpc every no_sim_per_mpc steps ---
+        if i >= 0 and i % conf.no_sim_per_mpc == 0:
+            x_k = interpolator.x
+            if REACTIVE:
+                # ZMP/yaw reference over the horizon from the reactive buffer,
+                # phase-aligned within the current step
+                ZMP_ref_k, YAW_ref_k = reactive_planner.mpc_reference(mpc_phase)
+                terminal_idx = -1
+                mpc_phase += 1
+            else:
+                ZMP_ref_k = ZMP_ref[k:k + conf.no_mpc_samples_per_horizon]
+                YAW_ref_k = YAW_ref[k:k + conf.no_mpc_samples_per_horizon]
+                remaining = len(ZMP_ref) - k
+                terminal_idx = remaining - 1 if remaining < conf.no_mpc_samples_per_horizon else -1
+                k += 1
+            u_k = mpc.buildSolveOCP(x_k, ZMP_ref_k, terminal_idx, yaw_ref_k=YAW_ref_k)
 
         # --- references, every iteration ---
         if i < 0:
@@ -357,38 +537,29 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                 T_swing, V_swing, A_swing = swing_trajectory.evaluate(t_step_elapsed)
                 robot.updateSwingFootRef(T_swing, V_swing.vector, A_swing.vector)
 
-            # steer the torso toward the desired (leading) path heading, so the
-            # trunk actively pulls the body around the turn instead of lagging
+            # steer the torso toward the desired heading (fixed in omnidirectional
+            # walking; only turns if the footsteps carry yaw)
             psi_des = (heading_des - yaw_sup0 + np.pi) % (2 * np.pi) - np.pi
             torso_yaw += TORSO_YAW_LP * (psi_des - torso_yaw)          # low-pass
             cz, sz = np.cos(torso_yaw), np.sin(torso_yaw)
             Rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
             robot.stack.setTorsoRefState(pin.SE3(Rz @ R_torso0, p_torso0))
 
-        # --- crowd: pedestrians avoid the robot; expose their states ---
-        body_id = robot.robot.id()
-        com = simulator.computeComPosition(body_id)
-        vcom = simulator.computeComVelocity(body_id)
-        # robot_radius inflated as a safety margin
-        crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
-        ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
-        # TODO: update the robot with the crowd states, e.g. for a reactive avoidance layer
-
         # --- advance the simulation + whole-body control ---
         simulator.step()
         robot.update()
 
-        # --- turning diagnostic (once per second while walking) ---
+        # --- refresh onboard-camera obstacle estimates at ~30 Hz (after the step,
+        #     so the depth/segmentation render sees the updated scene) ---
+        if PEDESTRIAN_SENSOR_DATA and i % max(1, int(round((1.0 / 30.0) / conf.dt))) == 0:
+            robot.update_obstacles()
+
+        # --- navigation diagnostic (once per second while walking) ---
         if i >= 0 and i % int(round(1.0 / conf.dt)) == 0:
-            T_sup_d = robot.supportFootPose()
-            sup_yaw = np.degrees(np.arctan2(T_sup_d.rotation[1, 0], T_sup_d.rotation[0, 0]))
-            T_base_d, _ = robot.stack.baseState()
-            base_yaw = np.degrees(np.arctan2(T_base_d.rotation[1, 0], T_base_d.rotation[0, 0]))
-            tgt_yaw = np.degrees(np.arctan2(plan[plan_idx - 1].pose.rotation[1, 0],
-                                            plan[plan_idx - 1].pose.rotation[0, 0]))
-            print(f"[turn] t={t:5.1f}s  target_step_yaw={tgt_yaw:7.1f}  "
-                  f"support_yaw={sup_yaw:7.1f}  base_yaw={base_yaw:7.1f}  "
-                  f"torso_ref_yaw={np.degrees(yaw_sup0 + torso_yaw):7.1f}  [deg]")
+            dist_goal = float(np.hypot(*(np.asarray(ROBOT_GOAL, float) - com[:2])))
+            print(f"[nav] t={t:5.1f}s  com=({com[0]:5.2f},{com[1]:5.2f})  "
+                  f"dist_goal={dist_goal:4.2f}  |v_cmd|={np.hypot(*v_cmd):4.2f}  "
+                  f"v_cmd=({v_cmd[0]:+.2f},{v_cmd[1]:+.2f})")
 
         # publish to ros at ~30 Hz
         if t - t_publish > 1. / 30.:
@@ -407,9 +578,30 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
 # main
 ################################################################################
 
+def _read_runtime_params():
+    """Read runtime ROS 2 parameters and apply them to the module globals.
+    Override at launch, e.g.:
+        ros2 run bullet_sims walking --ros-args \
+            -p scenario:=crossing -p pedestrian_sensor_data:=true
+    """
+    global SCENARIO, PEDESTRIAN_SENSOR_DATA
+    node = rclpy.create_node("walking_params")
+    node.declare_parameter("scenario", SCENARIO)
+    node.declare_parameter("pedestrian_sensor_data", PEDESTRIAN_SENSOR_DATA)
+    SCENARIO = node.get_parameter("scenario").get_parameter_value().string_value
+    PEDESTRIAN_SENSOR_DATA = node.get_parameter(
+        "pedestrian_sensor_data").get_parameter_value().bool_value
+    node.destroy_node()
+    print(f"[walking] scenario='{SCENARIO}'  "
+          f"pedestrian_sensor_data={PEDESTRIAN_SENSOR_DATA}")
+
+
 def main():
     # NOTE: ros2 run skips the __main__ block, so all setup happens here.
     simulator = _setup_simulator()
+
+    # runtime parameters (scenario, sensor vs ground truth) -> module globals
+    _read_runtime_params()
 
     # crowd must be created before the robot (see _setup_crowd)
     crowd = _setup_crowd(simulator)
@@ -419,12 +611,18 @@ def main():
         return
     tw, robot = created
 
-    # footstep plan + zmp reference
+    # register the pedestrian geoms so the depth-camera perception tracks them
+    # (each pedestrian mocap body carries a geom named "<ped.name>_geom")
+    if PEDESTRIAN_SENSOR_DATA:
+        robot.set_obstacle_geoms([f"{p.name}_geom" for p in crowd.peds])
+
+    # fixed footstep plan (only used when REACTIVE is False; the reactive planner
+    # is created inside the loop and generates its footsteps online from v_cmd)
     planner, plan, no_steps = _build_plan(robot)
     ZMP_ref = generate_zmp_reference(plan, conf.no_mpc_samples_per_step)
     YAW_ref = generate_yaw_reference(plan, conf.no_mpc_samples_per_step)
-    print("Plotting the footstep plan and ZMP reference\n")
-    planner.plot(simulator)
+    if not REACTIVE:
+        planner.plot(simulator)
 
     # lip mpc + interpolator + pre-walk sway endpoints
     mpc, interpolator, com_start, com_target = _setup_lip_mpc(robot)
@@ -433,11 +631,16 @@ def main():
     # iteration counts
     pre_dur = 3.0   # time to wait before walking starts
     N_pre = int(round(pre_dur / conf.dt))
-    N_sim = int(round(no_steps * conf.step_dur / conf.dt))
+    if REACTIVE:
+        N_sim = int(round(WALK_DURATION / conf.dt))
+    else:
+        N_sim = int(round(no_steps * conf.step_dur / conf.dt))
 
     # run the simulation, then plot
     L = _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref,
                   com_start, com_target, N_pre, N_sim)
+    _plot_navigation(L)
+
     _plot_results(L)
 
     if rclpy.ok():

@@ -155,6 +155,7 @@ def _allocate_logs(N_sim, n_peds=0):
         VPREF=nan(N_sim, 2),                    # goal-direction preferred velocity
         GOAL=np.asarray((0.0, 0.0)),            # filled in _run_loop
         PED_RADII=np.zeros(max(n_peds, 1)),     # filled in _run_loop
+        ROBOT_RADIUS=0.3,                       # physical robot radius [m], filled in _run_loop
         # CoM position/velocity/acceleration: reference (LIP), pinocchio, pybullet
         COM_POS_REF=nan(N_sim, 3), COM_VEL_REF=nan(N_sim, 3), COM_ACC_REF=nan(N_sim, 3),
         COM_POS_PIN=nan(N_sim, 3), COM_VEL_PIN=nan(N_sim, 3), COM_ACC_PIN=nan(N_sim, 3),
@@ -372,6 +373,103 @@ def _plot_navigation(L):
         plt.close(fig)
 
 
+def _animate_navigation(L, fps=20, target_frames=200):
+    """Animated top-down view of the run: robot and pedestrians as moving bodies
+    (drawn at their physical radii) with fading trails, saved as a GIF.
+
+    Set WALKING_NO_GIF=1 to skip (the animation is the slow part of plotting)."""
+    import os
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle
+    from matplotlib.animation import FuncAnimation, PillowWriter
+
+    if os.environ.get('WALKING_NO_GIF'):
+        return
+
+    # samples that actually got recorded (buffers are NaN-padded up front)
+    valid = np.where(~np.isnan(L.TIME) & ~np.isnan(L.ROBOT_XY[:, 0]))[0]
+    if len(valid) < 2:
+        print("not enough navigation samples to animate")
+        return
+    # downsample so the gif stays small regardless of control-loop rate
+    stride = max(1, len(valid) // target_frames)
+    frames = valid[::stride]
+    if frames[-1] != valid[-1]:
+        frames = np.append(frames, valid[-1])
+
+    n_peds = L.PED_XY.shape[1]
+    robot_r = float(getattr(L, 'ROBOT_RADIUS', 0.3))
+    ped_r = np.asarray(L.PED_RADII, dtype=float)
+
+    # fixed axis limits covering the whole run (robot + peds + goal), with margin
+    xs = [L.ROBOT_XY[valid, 0], np.atleast_1d(L.GOAL[0])]
+    ys = [L.ROBOT_XY[valid, 1], np.atleast_1d(L.GOAL[1])]
+    for j in range(n_peds):
+        xs.append(L.PED_XY[valid, j, 0]); ys.append(L.PED_XY[valid, j, 1])
+    xs = np.concatenate(xs); ys = np.concatenate(ys)
+    xs = xs[~np.isnan(xs)]; ys = ys[~np.isnan(ys)]
+    margin = max(1.0, robot_r + (ped_r.max() if ped_r.size else 0.3))
+    xlim = (xs.min() - margin, xs.max() + margin)
+    ylim = (ys.min() - margin, ys.max() + margin)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_xlim(*xlim); ax.set_ylim(*ylim)
+    ax.set_aspect('equal')
+    ax.set_xlabel('x [m]'); ax.set_ylabel('y [m]')
+    ax.grid(True, alpha=0.3)
+    ax.plot(L.GOAL[0], L.GOAL[1], '*', color='tab:red', ms=18, zorder=5, label='goal')
+
+    # trails (drawn up to the current frame)
+    robot_trail, = ax.plot([], [], '-', color='tab:green', lw=2.0, alpha=0.7, label='robot')
+    ped_trails = [ax.plot([], [], '-', color='tab:gray', lw=1.0, alpha=0.4,
+                          label='pedestrians' if j == 0 else None)[0]
+                  for j in range(n_peds)]
+    # bodies drawn as circles at physical radii
+    robot_body = Circle((0.0, 0.0), robot_r, color='tab:green', alpha=0.9, zorder=6)
+    ax.add_patch(robot_body)
+    ped_bodies = []
+    for j in range(n_peds):
+        rj = float(ped_r[j]) if j < ped_r.size else 0.3
+        c = Circle((0.0, 0.0), rj, color='tab:blue', alpha=0.6, zorder=4)
+        ax.add_patch(c); ped_bodies.append(c)
+    time_text = ax.text(0.02, 0.98, '', transform=ax.transAxes, va='top', fontsize=11,
+                        bbox=dict(boxstyle='round', fc='white', alpha=0.7))
+    ax.set_title('Top-down view (robot & crowd)')
+    ax.legend(loc='upper right', fontsize=9)
+
+    def update(i):
+        upto = valid[valid <= i]
+        robot_trail.set_data(L.ROBOT_XY[upto, 0], L.ROBOT_XY[upto, 1])
+        robot_body.center = (L.ROBOT_XY[i, 0], L.ROBOT_XY[i, 1])
+        for j in range(n_peds):
+            px, py = L.PED_XY[upto, j, 0], L.PED_XY[upto, j, 1]
+            ped_trails[j].set_data(px, py)
+            pj = L.PED_XY[i, j]
+            if not np.isnan(pj[0]):
+                ped_bodies[j].center = (pj[0], pj[1])
+                ped_bodies[j].set_visible(True)
+            else:
+                ped_bodies[j].set_visible(False)
+        time_text.set_text(f"t = {L.TIME[i]:5.2f} s")
+        return [robot_trail, robot_body, time_text, *ped_trails, *ped_bodies]
+
+    anim = FuncAnimation(fig, update, frames=frames, blit=False,
+                         interval=1000.0 / max(fps, 1))
+
+    plots_dir = os.environ.get(
+        'WALKING_PLOTS_DIR',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plots', 'T7'))
+    try:
+        os.makedirs(plots_dir, exist_ok=True)
+        out_path = os.path.join(plots_dir, 'navigation_top_down.gif')
+        anim.save(out_path, writer=PillowWriter(fps=fps))
+        print(f"saved top-down animation to {out_path}")
+    except Exception as e:
+        print(f"could not save top-down animation: {e}")
+    finally:
+        plt.close(fig)
+
+
 ################################################################################
 # main control loop
 ################################################################################
@@ -384,6 +482,7 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     L = _allocate_logs(N_sim, n_peds)
     L.GOAL = np.asarray(ROBOT_GOAL, dtype=float)
     L.PED_RADII = np.array([r for (_, _, r) in crowd.states()])
+    L.ROBOT_RADIUS = ROBOT_RADIUS_PHYS
 
     k = 0                                       # MPC index (fixed-plan mode)
     plan_idx = 1                                # step index in the plan (fixed-plan mode)
@@ -640,6 +739,7 @@ def main():
     L = _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref,
                   com_start, com_target, N_pre, N_sim)
     _plot_navigation(L)
+    _animate_navigation(L)
 
     _plot_results(L)
 

@@ -523,152 +523,157 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         reactive_planner.make_footstep(robot.supportFootPose(), robot.support_foot),
         np.zeros(2))                             # seed the buffer until the first step
 
-    for i in range(-N_pre, N_sim):
-        t = i * conf.dt
-        dt = conf.dt
+    try:
+        for i in range(-N_pre, N_sim):
+            t = i * conf.dt
+            dt = conf.dt
 
-        # --- robot state + crowd + ORCA velocity command (first, so the reactive
-        #     planner can use the latest v_cmd) ---
-        body_id = robot.robot.id()
-        com = simulator.computeComPosition(body_id)
-        vcom = simulator.computeComVelocity(body_id)
-        # move the crowd (pedestrians still avoid the robot via ground-truth here)
-        crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
-        # pedestrian states for the robot come from the ONBOARD DEPTH CAMERA
-        # (only what the robot actually sees), not ground truth. update_obstacles()
-        # refreshes these at the perception rate; obstacles2d() returns the latest
-        # world-frame estimates {id, x, y, r, vx, vy, stale}.
-        if PEDESTRIAN_SENSOR_DATA:
-            ped_states = [(np.array([o['x'], o['y']]), np.array([o['vx'], o['vy']]), o['r'])
-                          for o in robot.obstacles2d()]
-        else:
-            ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
-        v_cmd = robot_ctrl.compute_velocity(com[:2], vcom[:2], ped_states)
-        v_pref = robot_ctrl.preferred_velocity(com[:2])
-
-        # --- navigation logging ---
-        if i >= 0:
-            L.ROBOT_XY[i] = com[:2]
-            for j, (p, _, r) in enumerate(ped_states):
-                L.PED_XY[i, j] = np.asarray(p, dtype=float)[:2]
-            gaps = [np.hypot(*(com[:2] - np.asarray(p, float)[:2])) - ROBOT_RADIUS_PHYS - r
-                    for (p, _, r) in ped_states]
-            L.MIN_SEP[i] = min(gaps) if gaps else np.nan
-            L.DIST_GOAL[i] = float(np.hypot(*(L.GOAL - com[:2])))
-            L.VCMD[i] = v_cmd
-            L.VPREF[i] = v_pref
-
-        # debug overlay: green = v_cmd (drives the footsteps), blue = goal direction,
-        # red sphere = goal
-        arrows = [a for a in (
-            debug_viz.velocity_arrow(com[:2], v_pref, z=float(com[2]),
-                                     scale=ARROW_SCALE, rgba=(0.3, 0.5, 1.0, 0.6)),
-            debug_viz.velocity_arrow(com[:2], v_cmd, z=float(com[2]),
-                                     scale=ARROW_SCALE, rgba=(0.1, 0.9, 0.1, 1.0)),
-        ) if a is not None]
-        goal_marker = debug_viz.point_marker(ROBOT_GOAL, z=0.15, radius=0.12,
-                                             rgba=(1.0, 0.2, 0.2, 1.0))
-        # yellow foot-shaped box at the next planned footstep
-        boxes = [debug_viz.footstep_box(next_step)] if next_step is not None else []
-        debug_viz.draw_scene(simulator, arrows=arrows, points=[goal_marker], boxes=boxes)
-
-        # --- step transition: pick/plan the next footstep, build swing spline ---
-        if i >= 0 and i % conf.no_sim_per_step == 0:
-            if REACTIVE:
-                # plan the next step in the direction of v_cmd (steps in place at goal)
-                swing_side = current_swing_side
-                support_side = other_foot_id(swing_side)
-                robot.setSwingFoot(swing_side)
-                robot.setSupportFoot(support_side)
-                support_fs = reactive_planner.make_footstep(
-                    robot.supportFootPose(), support_side)
-                at_goal = reactive_planner.at_goal(com[:2])
-                reactive_planner.regenerate(support_fs, v_cmd, at_goal)
-                next_step = reactive_planner.swing_target()
-                current_swing_side = other_foot_id(swing_side)
-                mpc_phase = 0
+            # --- robot state + crowd + ORCA velocity command (first, so the reactive
+            #     planner can use the latest v_cmd) ---
+            body_id = robot.robot.id()
+            com = simulator.computeComPosition(body_id)
+            vcom = simulator.computeComVelocity(body_id)
+            # move the crowd (pedestrians still avoid the robot via ground-truth here)
+            crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
+            # pedestrian states for the robot come from the ONBOARD DEPTH CAMERA
+            # (only what the robot actually sees), not ground truth. update_obstacles()
+            # refreshes these at the perception rate; obstacles2d() returns the latest
+            # world-frame estimates {id, x, y, r, vx, vy, stale}.
+            if PEDESTRIAN_SENSOR_DATA:
+                ped_states = [(np.array([o['x'], o['y']]), np.array([o['vx'], o['vy']]), o['r'])
+                              for o in robot.obstacles2d()]
             else:
-                next_step = plan[plan_idx]
-                robot.setSwingFoot(next_step.side)
-                robot.setSupportFoot(other_foot_id(next_step.side))
-                plan_idx += 1
-            T0_swing = robot.swingFootPose()
-            T1_swing = next_step.poseInWorld()
-            swing_trajectory = SwingFootTrajectory(T0_swing, T1_swing, conf.step_dur)
-            t_step_elapsed = 0.0
-            heading_des = np.arctan2(next_step.pose.rotation[1, 0],
-                                     next_step.pose.rotation[0, 0])
+                ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
+            v_cmd = robot_ctrl.compute_velocity(com[:2], vcom[:2], ped_states)
+            v_pref = robot_ctrl.preferred_velocity(com[:2])
 
-        # --- update the mpc every no_sim_per_mpc steps ---
-        if i >= 0 and i % conf.no_sim_per_mpc == 0:
-            x_k = interpolator.x
-            if REACTIVE:
-                # ZMP/yaw reference over the horizon from the reactive buffer,
-                # phase-aligned within the current step
-                ZMP_ref_k, YAW_ref_k = reactive_planner.mpc_reference(mpc_phase)
-                terminal_idx = -1
-                mpc_phase += 1
-            else:
-                ZMP_ref_k = ZMP_ref[k:k + conf.no_mpc_samples_per_horizon]
-                YAW_ref_k = YAW_ref[k:k + conf.no_mpc_samples_per_horizon]
-                remaining = len(ZMP_ref) - k
-                terminal_idx = remaining - 1 if remaining < conf.no_mpc_samples_per_horizon else -1
-                k += 1
-            u_k = mpc.buildSolveOCP(x_k, ZMP_ref_k, terminal_idx, yaw_ref_k=YAW_ref_k)
+            # --- navigation logging ---
+            if i >= 0:
+                L.ROBOT_XY[i] = com[:2]
+                for j, (p, _, r) in enumerate(ped_states):
+                    L.PED_XY[i, j] = np.asarray(p, dtype=float)[:2]
+                gaps = [np.hypot(*(com[:2] - np.asarray(p, float)[:2])) - ROBOT_RADIUS_PHYS - r
+                        for (p, _, r) in ped_states]
+                L.MIN_SEP[i] = min(gaps) if gaps else np.nan
+                L.DIST_GOAL[i] = float(np.hypot(*(L.GOAL - com[:2])))
+                L.VCMD[i] = v_cmd
+                L.VPREF[i] = v_pref
 
-        # --- references, every iteration ---
-        if i < 0:
-            # pre-walk: cosine smoothstep sway of the CoM from spawn to the first
-            # support foot (zero velocity at both ends so the wbc settles)
-            s = (i + N_pre) / N_pre
-            s = 0.5 - 0.5 * np.cos(np.pi * s)
-            robot.stack.setComRefState((1.0 - s) * com_start + s * com_target)
+            # debug overlay: green = v_cmd (drives the footsteps), blue = goal direction,
+            # red sphere = goal
+            arrows = [a for a in (
+                debug_viz.velocity_arrow(com[:2], v_pref, z=float(com[2]),
+                                         scale=ARROW_SCALE, rgba=(0.3, 0.5, 1.0, 0.6)),
+                debug_viz.velocity_arrow(com[:2], v_cmd, z=float(com[2]),
+                                         scale=ARROW_SCALE, rgba=(0.1, 0.9, 0.1, 1.0)),
+            ) if a is not None]
+            goal_marker = debug_viz.point_marker(ROBOT_GOAL, z=0.15, radius=0.12,
+                                                 rgba=(1.0, 0.2, 0.2, 1.0))
+            # yellow foot-shaped box at the next planned footstep
+            boxes = [debug_viz.footstep_box(next_step)] if next_step is not None else []
+            debug_viz.draw_scene(simulator, arrows=arrows, points=[goal_marker], boxes=boxes)
 
-        if i >= 0:
-            t_step_elapsed += dt
-            # advance the lip at sim rate with the held mpc control, feed the
-            # interpolated com into the wbc com task
-            interpolator.integrate(u_k)
-            c, c_dot, c_ddot = interpolator.comState()
-            robot.stack.setComRefState(c, c_dot, c_ddot)
-            # evaluate the swing-foot spline and update its motion reference
-            if swing_trajectory is not None:
-                T_swing, V_swing, A_swing = swing_trajectory.evaluate(t_step_elapsed)
-                robot.updateSwingFootRef(T_swing, V_swing.vector, A_swing.vector)
+            # --- step transition: pick/plan the next footstep, build swing spline ---
+            if i >= 0 and i % conf.no_sim_per_step == 0:
+                if REACTIVE:
+                    # plan the next step in the direction of v_cmd (steps in place at goal)
+                    swing_side = current_swing_side
+                    support_side = other_foot_id(swing_side)
+                    robot.setSwingFoot(swing_side)
+                    robot.setSupportFoot(support_side)
+                    support_fs = reactive_planner.make_footstep(
+                        robot.supportFootPose(), support_side)
+                    at_goal = reactive_planner.at_goal(com[:2])
+                    reactive_planner.regenerate(support_fs, v_cmd, at_goal)
+                    next_step = reactive_planner.swing_target()
+                    current_swing_side = other_foot_id(swing_side)
+                    mpc_phase = 0
+                else:
+                    next_step = plan[plan_idx]
+                    robot.setSwingFoot(next_step.side)
+                    robot.setSupportFoot(other_foot_id(next_step.side))
+                    plan_idx += 1
+                T0_swing = robot.swingFootPose()
+                T1_swing = next_step.poseInWorld()
+                swing_trajectory = SwingFootTrajectory(T0_swing, T1_swing, conf.step_dur)
+                t_step_elapsed = 0.0
+                heading_des = np.arctan2(next_step.pose.rotation[1, 0],
+                                         next_step.pose.rotation[0, 0])
 
-            # steer the torso toward the desired heading (fixed in omnidirectional
-            # walking; only turns if the footsteps carry yaw)
-            psi_des = (heading_des - yaw_sup0 + np.pi) % (2 * np.pi) - np.pi
-            torso_yaw += TORSO_YAW_LP * (psi_des - torso_yaw)          # low-pass
-            cz, sz = np.cos(torso_yaw), np.sin(torso_yaw)
-            Rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
-            robot.stack.setTorsoRefState(pin.SE3(Rz @ R_torso0, p_torso0))
+            # --- update the mpc every no_sim_per_mpc steps ---
+            if i >= 0 and i % conf.no_sim_per_mpc == 0:
+                x_k = interpolator.x
+                if REACTIVE:
+                    # ZMP/yaw reference over the horizon from the reactive buffer,
+                    # phase-aligned within the current step
+                    ZMP_ref_k, YAW_ref_k = reactive_planner.mpc_reference(mpc_phase)
+                    terminal_idx = -1
+                    mpc_phase += 1
+                else:
+                    ZMP_ref_k = ZMP_ref[k:k + conf.no_mpc_samples_per_horizon]
+                    YAW_ref_k = YAW_ref[k:k + conf.no_mpc_samples_per_horizon]
+                    remaining = len(ZMP_ref) - k
+                    terminal_idx = remaining - 1 if remaining < conf.no_mpc_samples_per_horizon else -1
+                    k += 1
+                u_k = mpc.buildSolveOCP(x_k, ZMP_ref_k, terminal_idx, yaw_ref_k=YAW_ref_k)
 
-        # --- advance the simulation + whole-body control ---
-        simulator.step()
-        robot.update()
+            # --- references, every iteration ---
+            if i < 0:
+                # pre-walk: cosine smoothstep sway of the CoM from spawn to the first
+                # support foot (zero velocity at both ends so the wbc settles)
+                s = (i + N_pre) / N_pre
+                s = 0.5 - 0.5 * np.cos(np.pi * s)
+                robot.stack.setComRefState((1.0 - s) * com_start + s * com_target)
 
-        # --- refresh onboard-camera obstacle estimates at ~30 Hz (after the step,
-        #     so the depth/segmentation render sees the updated scene) ---
-        if PEDESTRIAN_SENSOR_DATA and i % max(1, int(round((1.0 / 30.0) / conf.dt))) == 0:
-            robot.update_obstacles()
+            if i >= 0:
+                t_step_elapsed += dt
+                # advance the lip at sim rate with the held mpc control, feed the
+                # interpolated com into the wbc com task
+                interpolator.integrate(u_k)
+                c, c_dot, c_ddot = interpolator.comState()
+                robot.stack.setComRefState(c, c_dot, c_ddot)
+                # evaluate the swing-foot spline and update its motion reference
+                if swing_trajectory is not None:
+                    T_swing, V_swing, A_swing = swing_trajectory.evaluate(t_step_elapsed)
+                    robot.updateSwingFootRef(T_swing, V_swing.vector, A_swing.vector)
 
-        # --- navigation diagnostic (once per second while walking) ---
-        if i >= 0 and i % int(round(1.0 / conf.dt)) == 0:
-            dist_goal = float(np.hypot(*(np.asarray(ROBOT_GOAL, float) - com[:2])))
-            print(f"[nav] t={t:5.1f}s  com=({com[0]:5.2f},{com[1]:5.2f})  "
-                  f"dist_goal={dist_goal:4.2f}  |v_cmd|={np.hypot(*v_cmd):4.2f}  "
-                  f"v_cmd=({v_cmd[0]:+.2f},{v_cmd[1]:+.2f})")
+                # steer the torso toward the desired heading (fixed in omnidirectional
+                # walking; only turns if the footsteps carry yaw)
+                psi_des = (heading_des - yaw_sup0 + np.pi) % (2 * np.pi) - np.pi
+                torso_yaw += TORSO_YAW_LP * (psi_des - torso_yaw)          # low-pass
+                cz, sz = np.cos(torso_yaw), np.sin(torso_yaw)
+                Rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
+                robot.stack.setTorsoRefState(pin.SE3(Rz @ R_torso0, p_torso0))
 
-        # publish to ros at ~30 Hz
-        if t - t_publish > 1. / 30.:
-            t_publish = t
-            robot.publish()
+            # --- advance the simulation + whole-body control ---
+            simulator.step()
+            robot.update()
 
-        # store for the post-run plots
-        if i >= 0:
-            _record_step(L, i, t, c, c_dot, c_ddot, t_step_elapsed,
-                         swing_trajectory, robot, simulator, interpolator, pin_data)
+            # --- refresh onboard-camera obstacle estimates at ~30 Hz (after the step,
+            #     so the depth/segmentation render sees the updated scene) ---
+            if PEDESTRIAN_SENSOR_DATA and i % max(1, int(round((1.0 / 30.0) / conf.dt))) == 0:
+                robot.update_obstacles()
+
+            # --- navigation diagnostic (once per second while walking) ---
+            if i >= 0 and i % int(round(1.0 / conf.dt)) == 0:
+                dist_goal = float(np.hypot(*(np.asarray(ROBOT_GOAL, float) - com[:2])))
+                print(f"[nav] t={t:5.1f}s  com=({com[0]:5.2f},{com[1]:5.2f})  "
+                      f"dist_goal={dist_goal:4.2f}  |v_cmd|={np.hypot(*v_cmd):4.2f}  "
+                      f"v_cmd=({v_cmd[0]:+.2f},{v_cmd[1]:+.2f})")
+
+            # publish to ros at ~30 Hz
+            if t - t_publish > 1. / 30.:
+                t_publish = t
+                robot.publish()
+
+            # store for the post-run plots
+            if i >= 0:
+                _record_step(L, i, t, c, c_dot, c_ddot, t_step_elapsed,
+                             swing_trajectory, robot, simulator, interpolator, pin_data)
+    except KeyboardInterrupt:
+        # allow an early Ctrl-C: return whatever was logged so far so the
+        # post-run plots and top-down GIF are still produced.
+        print("\ninterrupted (Ctrl-C): plotting partial run...")
 
     return L
 

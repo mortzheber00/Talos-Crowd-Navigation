@@ -44,6 +44,9 @@ lfxp = foot_scaling*0.12                # foot length in positive x direction
 lfxn = foot_scaling*0.08                # foot length in negative x direction
 lfyp = foot_scaling*0.065               # foot length in positive y direction
 lfyn = foot_scaling*0.065               # foot length in negative y direction
+zmp_margin = 0.02                       # [m] safety margin shrinking the MPC's
+                                        # ZMP/CoP box inside the sole (edge CoP
+                                        # = the foot rolls about that edge)
 
 lz = 0.                                 # foot sole height with respect to ankle joint
 f_mu = 0.3                              # friction coefficient

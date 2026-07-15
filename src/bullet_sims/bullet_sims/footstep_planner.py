@@ -2,8 +2,10 @@ import numpy as np
 import pinocchio as pin
 from enum import Enum
 import time
-import pybullet as pb
-import pybullet_data
+# pybullet is unused outside this file's __main__ test block and has no arm64
+# wheel; keep the top-level import disabled so the module imports everywhere
+# import pybullet as pb
+# import pybullet_data
 import bullet_sims.talos_conf as conf
 import simulator.utilities as sim_utils
 

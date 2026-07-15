@@ -9,6 +9,9 @@
 
   <depend>rclpy</depend>
   <depend>simulator</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>crowd_nav_interfaces</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

@@ -80,6 +80,7 @@ def main():
                 robot.publish()              # joint states + TF (RViz)
                 robot.publish_depth_image()  # depth image (32FC1)
                 robot.update_obstacles()     # (x, y, r, vx, vy) per cylinder
+                robot.publish_obstacles()    # ObstacleArray on obstacles/perceived
                 robot.publish_obstacle_markers(crowd.ground_truth())
                 rclpy.spin_once(robot._node, timeout_sec=0.0)
 

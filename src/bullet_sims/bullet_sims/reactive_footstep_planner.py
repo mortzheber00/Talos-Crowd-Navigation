@@ -13,12 +13,15 @@ way a person turns to face where they are going. Each step:
     fixed step width. The forward length shrinks with heading misalignment, so a
     sharply off-axis command turns (nearly) in place until the body faces it.
 
-This is a **non-holonomic / unicycle** gait: the swing foot is always placed
-``step_size_y`` to its own side of the *current facing* (never the travel
-direction), so the swing foot can never land across the stance foot — leg-crossing
-is eliminated by construction, and the robot follows a smooth arc instead of
-side-stepping. The geometry mirrors ``FootStepPlanner.planCircle(face_path=True)``,
-generalised so the turn rate comes from ``v_cmd`` rather than a fixed radius.
+This is a **blended side-step + turn** gait: the pelvis path point always
+translates along the FULL ``v_cmd`` (holonomic, like the old fixed-facing
+side-step — so lateral avoidance reacts within one step), while the facing turns
+toward the command by only a ``turn_gain`` fraction of the heading error per step
+(rate-limited by ``max_dyaw``). ``turn_gain = 0`` recovers the pure fixed-facing
+side-step exactly (the most stable mode); ``turn_gain = 1`` turns as fast as the
+rate limit allows. Because the displacement is no longer tied to the facing, an
+explicit anti-crossing guard (``_guard_cross``) keeps the swing foot a minimum
+lateral separation to its own side of the previous foot.
 
 The planner keeps a short lookahead buffer (a few steps ahead, all extrapolated
 from the current ``v_cmd``) so the LIP-MPC can see the ~2 steps of ZMP/yaw reference
@@ -52,7 +55,8 @@ class ReactiveFootStepPlanner:
     def __init__(self, conf, goal, support_pose,
                  samples_per_step, samples_per_horizon,
                  max_step_len=None, goal_tol=0.3, n_lookahead=None,
-                 max_dyaw=None, turn_deadband=0.05):
+                 max_dyaw=None, turn_deadband=0.05, turn_gain=0.3,
+                 min_lateral_sep=None):
         """
         Args:
             conf: talos_conf module (uses step_size_x/y, step_dur, foot half-sizes).
@@ -67,9 +71,15 @@ class ReactiveFootStepPlanner:
             n_lookahead (int): how many future steps to keep buffered (auto if None).
             max_dyaw (float): max heading change per step [rad] (rate limit on the
                 turn). Small -> gentle arcs, which keeps the LIP laterally stable.
-                Defaults to 10 deg/step.
+                Defaults to 6 deg/step.
             turn_deadband (float): command speed [m/s] below which the heading is
                 held (no turning) and the robot steps in place.
+            turn_gain (float in [0, 1]): fraction of the heading error the facing
+                turns per step (before the max_dyaw cap). 0 -> fixed-facing
+                side-step (most stable), 1 -> full-rate turning.
+            min_lateral_sep (float): minimum lateral separation [m] the swing
+                foot keeps to its own side of the previous foot (anti-crossing).
+                Defaults to the foot width + 2 cm.
         """
         self.conf = conf
         self.goal = np.asarray(goal, dtype=float)[:2].copy()
@@ -79,8 +89,12 @@ class ReactiveFootStepPlanner:
         self.goal_tol = goal_tol
         self.samples_per_step = int(samples_per_step)
         self.samples_per_horizon = int(samples_per_horizon)
-        self.max_dyaw = np.deg2rad(10.0) if max_dyaw is None else float(max_dyaw)
+        self.max_dyaw = np.deg2rad(6.0) if max_dyaw is None else float(max_dyaw)
         self.turn_deadband = float(turn_deadband)
+        self.turn_gain = float(np.clip(turn_gain, 0.0, 1.0))
+        foot_width = conf.lfyp + conf.lfyn
+        self.min_lateral_sep = (foot_width + 0.02) if min_lateral_sep is None \
+            else float(min_lateral_sep)
 
         need = int(np.ceil(self.samples_per_horizon / self.samples_per_step)) + 2
         self.n_lookahead = need if n_lookahead is None else int(n_lookahead)
@@ -115,27 +129,46 @@ class ReactiveFootStepPlanner:
         c, s = np.cos(psi), np.sin(psi)
         return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
-    def _advance_heading(self, psi, v_cmd):
-        """One steering update: rotate ``psi`` toward the v_cmd direction (rate-
-        limited, deadbanded) and return the new heading plus the forward step
-        length along it.
+    def _advance(self, psi, v_cmd):
+        """One steering update: translate along the FULL command (holonomic)
+        and turn the facing a bounded fraction toward it.
 
-        The forward length uses the command speed projected onto the NEW heading,
-        so a command pointing far off the current facing yields ~zero length (the
-        robot turns in place) and only walks forward once it is roughly aligned.
+        Returns (psi_new, disp) where ``disp`` is the 2D pelvis displacement for
+        the step. Unlike the earlier unicycle version, the displacement is NOT
+        projected onto the facing — an off-axis command side-steps immediately
+        (one-step reactivity) while the body comes around gradually.
         """
         v = np.asarray(v_cmd, dtype=float)[:2]
         speed = np.hypot(*v)
         if speed < self.turn_deadband:
             # no meaningful command -> hold heading, step in place
-            return psi, 0.0
+            return psi, np.zeros(2)
         psi_des = np.arctan2(v[1], v[0])
-        dpsi = np.clip(_wrap(psi_des - psi), -self.max_dyaw, self.max_dyaw)
+        dpsi = np.clip(self.turn_gain * _wrap(psi_des - psi),
+                       -self.max_dyaw, self.max_dyaw)
         psi_new = psi + dpsi
-        # forward speed = command projected onto the new facing (>= 0)
-        fwd = float(v @ np.array([np.cos(psi_new), np.sin(psi_new)]))
-        length = float(np.clip(max(0.0, fwd) * self.step_dur, 0.0, self.max_step_len))
-        return psi_new, length
+        disp = v * self.step_dur
+        norm = np.hypot(*disp)
+        if norm > self.max_step_len:
+            disp = disp * (self.max_step_len / norm)
+        return psi_new, disp
+
+    def _guard_cross(self, centre, psi, swing_side, prev_foot_xy):
+        """Anti-crossing guard: keep the swing foot at least ``min_lateral_sep``
+        to its OWN side of the previous foot, measured along the facing's left
+        axis. Shifts the pelvis centre laterally when violated. Needed because
+        the displacement now follows v_cmd rather than the facing, so a hard
+        lateral command could otherwise land the swing foot across the stance
+        foot."""
+        left = self._left_dir(psi)
+        lateral = self.sy if swing_side == Side.LEFT else -self.sy
+        foot_xy = np.asarray(centre, float)[:2] + lateral * left
+        d = float(left @ (foot_xy - np.asarray(prev_foot_xy, float)[:2]))
+        if swing_side == Side.LEFT and d < self.min_lateral_sep:
+            centre = centre + (self.min_lateral_sep - d) * left
+        elif swing_side == Side.RIGHT and d > -self.min_lateral_sep:
+            centre = centre + (-self.min_lateral_sep - d) * left
+        return centre
 
     def _place_foot(self, centre_xy, psi, swing_side):
         """Place the swing foot ``step_size_y`` to its own side of the pelvis path
@@ -160,11 +193,15 @@ class ReactiveFootStepPlanner:
         self.buffer = [support_fs]
         psi = self.psi
         swing_side = other_foot_id(support_fs.side)
+        prev_foot_xy = support_xy
         first_psi = None
         for _ in range(self.n_lookahead):
-            psi, length = self._advance_heading(psi, vc)
-            centre = centre + length * np.array([np.cos(psi), np.sin(psi)])
-            self.buffer.append(self._place_foot(centre, psi, swing_side))
+            psi, disp = self._advance(psi, vc)
+            centre = centre + disp
+            centre = self._guard_cross(centre, psi, swing_side, prev_foot_xy)
+            fs = self._place_foot(centre, psi, swing_side)
+            self.buffer.append(fs)
+            prev_foot_xy = np.asarray(fs.pose.translation)[:2]
             if first_psi is None:
                 first_psi = psi
             swing_side = other_foot_id(swing_side)

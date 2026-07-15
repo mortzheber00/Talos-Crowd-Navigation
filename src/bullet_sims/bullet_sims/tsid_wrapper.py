@@ -336,6 +336,31 @@ class TSIDWrapper:
         assert self.model.existFrame(conf.base_frame_name)
         self.base_id = self.model.getFrameId(conf.base_frame_name)
 
+        '''
+        Optional: steer the base (pelvis) yaw along with the torso during
+        turns (yaw-only mask, soft). The idea: with only the torso steered, the
+        waist joint absorbs the heading and the hip-yaw joints take the whole
+        foot-vs-body twist. DISABLED by default (w_base = 0): A/B sim tests on
+        2026-07-15 (45 deg turn goal, blended gait) showed it makes the robot
+        fall EARLIER (t=5.5s vs t=17.7s without it). Enable via conf.w_base>0
+        to re-test; keep w_base <= ~2 or straight walking destabilizes.
+        '''
+        self.baseTask = None
+        self.base_ref = None
+        if getattr(self.conf, 'w_base', 0.0) > 0.0:
+            self.baseTask = tsid.TaskSE3Equality(
+                "task-base", self.robot, self.conf.base_frame_name)
+            base_mask = np.array([0., 0., 0., 0., 0., 1.])
+            self.baseTask.setKp(self.conf.kp_base * base_mask)
+            self.baseTask.setKd(2.0 * np.sqrt(self.conf.kp_base) * base_mask)
+            self.baseTask.setMask(base_mask)
+            formulation.addMotionTask(self.baseTask, self.conf.w_base, 1, 0.0)
+
+            # base reference is current
+            H_base_ref = robot.framePosition(data, self.base_id)
+            self.base_ref = create_sample(H_base_ref)
+            self.baseTask.setReference(self.base_ref)
+
         ########################################################################
         # bounds on torque and velocity
         ########################################################################
@@ -527,6 +552,14 @@ class TSIDWrapper:
     def torsoReference(self):
         return self.torso_ref
     
+    def setBaseOriRefState(self, pos, vel=None, acc=None):
+        """Set the base (pelvis) SE3 reference; only the yaw row is active.
+        No-op when the base task is disabled (conf.w_base == 0)."""
+        if self.baseTask is None:
+            return
+        update_sample(self.base_ref, pos, vel, acc)
+        self.baseTask.setReference(self.base_ref)
+
     def baseState(self, dv=None):
         data = self.formulation.data()
         T_frame_w = self.robot.framePosition(data, self.base_id)

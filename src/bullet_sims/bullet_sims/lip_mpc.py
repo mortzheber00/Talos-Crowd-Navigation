@@ -134,6 +134,12 @@ class LIPMPC:
         self.omega = np.sqrt(conf.g / conf.h)
         self.Ad, self.Bd = discrete_LIP_dynamics(conf.dt_mpc, conf.g, conf.h)
 
+        # weight of the SOFT terminal capture-point penalty. A hard equality
+        # makes the QP infeasible once an aggressive maneuver drives the state
+        # large (the unstable LIP mode is propagated over the whole horizon);
+        # much larger values (~1e3) ill-condition the Hessian.
+        self.beta = getattr(conf, 'beta', 100.0)
+
         # solution and references over the horizon
         self.X_k = None
         self.U_k = None
@@ -159,6 +165,11 @@ class LIPMPC:
         nu = 2
 
         ZMP_ref_k = np.atleast_2d(np.asarray(ZMP_ref_k, dtype=float))
+        # a non-finite state would make Drake assert while BUILDING the initial
+        # state constraint (beq.allFinite()), before Solve is even reached
+        if not np.all(np.isfinite(np.asarray(x_k, dtype=float))):
+            print(f"[lip_mpc] non-finite x_k {x_k} -> holding support-center ZMP")
+            return np.asarray(ZMP_ref_k[0], dtype=float).copy()
         n_ref = ZMP_ref_k.shape[0]
         N = min(self.no_samples, n_ref)
         N = max(N, 2)
@@ -225,7 +236,12 @@ class LIPMPC:
             # (state layout: [x, xdot, y, ydot]) -> indices 1 and 3
             prog.AddQuadraticCost(gamma * (state[i, 1]**2 + state[i, 3]**2))
 
-        # --- terminal (capture-point) constraint ---
+        # --- terminal (capture-point) penalty ---
+        # soft quadratic penalty instead of a hard equality: the equality makes
+        # the QP infeasible (and Drake assert-crashes on non-finite x_k) under
+        # aggressive maneuvers, since the unstable LIP mode blows the terminal
+        # state up over the horizon. The penalty keeps the same capturability
+        # bias while the QP stays feasible by construction.
         if terminal_idx is not None and 0 <= terminal_idx < N:
             t_idx = terminal_idx
         else:
@@ -233,16 +249,20 @@ class LIPMPC:
         ref = ZMP_ref_k[min(t_idx, n_ref - 1)]
         dcm_x = state[t_idx, 0] + state[t_idx, 1] / self.omega
         dcm_y = state[t_idx, 2] + state[t_idx, 3] / self.omega
-        prog.AddLinearConstraint(dcm_x == ref[0])
-        prog.AddLinearConstraint(dcm_y == ref[1])
+        prog.AddQuadraticCost(self.beta * ((dcm_x - ref[0])**2 + (dcm_y - ref[1])**2))
 
         # --- solve ---
-        result = Solve(prog)
-        if not result.is_success():
-            raise RuntimeError(
-                "LIPMPC.buildSolveOCP: QP solve failed "
-                f"({result.get_solution_result()})"
-            )
+        try:
+            result = Solve(prog)
+            ok = result.is_success()
+        except Exception as e:
+            print(f"[lip_mpc] QP solve raised {type(e).__name__}: {e} "
+                  "-> holding support-center ZMP")
+            return np.asarray(ZMP_ref_k[0], dtype=float).copy()
+        if not ok:
+            print("[lip_mpc] QP solve failed "
+                  f"({result.get_solution_result()}) -> holding support-center ZMP")
+            return np.asarray(ZMP_ref_k[0], dtype=float).copy()
 
         self.X_k = result.GetSolution(state)
         self.U_k = result.GetSolution(control)

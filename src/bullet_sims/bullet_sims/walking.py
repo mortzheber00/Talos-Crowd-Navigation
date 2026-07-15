@@ -47,10 +47,15 @@ CIRCLE_FACE_PATH = False
 
 # robot navigation: goal it heads toward, and the arrow display scale.
 # v_cmd (from ORCA) now DRIVES the reactive footstep planner; green arrow = v_cmd.
-ROBOT_GOAL = (4.0, 0.0)    # world (x, y) navigation goal
+ROBOT_GOAL = (4.0, 3.0)    # world (x, y) navigation goal
 ARROW_SCALE = 3.0          # visual stretch so the slow v_cmd arrow is visible
 WALK_DURATION = 30.0       # [s] max walk time (reactive walking has no fixed step count)
 REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MODE plan
+
+# blended gait knobs (A/B): TURN_GAIN=0 -> pure fixed-facing side-step (the old
+# stable mode); 1 -> turn at the full MAX_DYAW_DEG rate limit every step.
+TURN_GAIN = 0.0            # fraction of the heading error turned per step
+MAX_DYAW_DEG = 6.0         # [deg] max facing change per step
 
 # ---- runtime parameters (defaults; override at launch via ROS 2 params, e.g.
 #   ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=true )
@@ -404,6 +409,9 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     T_torso0, _ = robot.stack.torsoState()
     R_torso0 = T_torso0.rotation.copy()
     p_torso0 = T_torso0.translation.copy()
+    T_base0, _ = robot.stack.baseState()
+    R_base0 = T_base0.rotation.copy()
+    p_base0 = T_base0.translation.copy()
     T_sup0 = robot.supportFootPose()
     yaw_sup0 = np.arctan2(T_sup0.rotation[1, 0], T_sup0.rotation[0, 0])
     torso_yaw = 0.0                             # filtered heading (delta from start)
@@ -418,11 +426,14 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     # direction of v_cmd (omnidirectional / fixed facing) and feeds the MPC.
     reactive_planner = ReactiveFootStepPlanner(
         conf, ROBOT_GOAL, robot.supportFootPose(),
-        conf.no_mpc_samples_per_step, conf.no_mpc_samples_per_horizon)
+        conf.no_mpc_samples_per_step, conf.no_mpc_samples_per_horizon,
+        turn_gain=TURN_GAIN, max_dyaw=np.deg2rad(MAX_DYAW_DEG))
     current_swing_side = robot.swing_foot        # which foot swings next
     reactive_planner.regenerate(
         reactive_planner.make_footstep(robot.supportFootPose(), robot.support_foot),
         np.zeros(2))                             # seed the buffer until the first step
+    v_cmd_acc = np.zeros(2)                      # v_cmd sum since the last step
+    v_cmd_n = 0                                  # ... and its sample count
 
     for i in range(-N_pre, N_sim):
         t = i * conf.dt
@@ -446,6 +457,13 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
         v_cmd = robot_ctrl.compute_velocity(com[:2], vcom[:2], ped_states)
         v_pref = robot_ctrl.preferred_velocity(com[:2])
+        # accumulate for the per-step average: ORCA sees the CoM's gait-frequency
+        # lateral sway (+/-0.3 m/s), so the instantaneous v_cmd oscillates at the
+        # step frequency. Sampling it once per step at the transition ALIASES
+        # that oscillation (lateral progress freezes when the sample lands near
+        # zero), so the planner gets the average over the elapsed step instead.
+        v_cmd_acc += v_cmd
+        v_cmd_n += 1
 
         # --- navigation logging ---
         if i >= 0:
@@ -484,7 +502,11 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                 support_fs = reactive_planner.make_footstep(
                     robot.supportFootPose(), support_side)
                 at_goal = reactive_planner.at_goal(com[:2])
-                reactive_planner.regenerate(support_fs, v_cmd, at_goal)
+                # de-aliased command: average of v_cmd over the elapsed step
+                v_cmd_step = v_cmd_acc / max(v_cmd_n, 1)
+                v_cmd_acc[:] = 0.0
+                v_cmd_n = 0
+                reactive_planner.regenerate(support_fs, v_cmd_step, at_goal)
                 next_step = reactive_planner.swing_target()
                 current_swing_side = other_foot_id(swing_side)
                 mpc_phase = 0
@@ -544,6 +566,10 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             cz, sz = np.cos(torso_yaw), np.sin(torso_yaw)
             Rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
             robot.stack.setTorsoRefState(pin.SE3(Rz @ R_torso0, p_torso0))
+            # steer the base (pelvis) yaw with the same heading, so the waist
+            # does not absorb the whole turn and the hip-yaw joints don't take
+            # the full foot-vs-body twist (yaw-only task, position row masked)
+            robot.stack.setBaseOriRefState(pin.SE3(Rz @ R_base0, p_base0))
 
         # --- advance the simulation + whole-body control ---
         simulator.step()

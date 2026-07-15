@@ -74,6 +74,11 @@ w_foot = 5e0            # weight of the swing-foot motion task (walking needs re
 w_hand = 1e-1           # weight of the hand motion task
 w_torso = 4             # weight torso orientation task (raised from 1 so the trunk
                         # actively steers the heading through turns instead of lagging)
+w_base = 0              # weight of the base (pelvis) yaw task. 0 = DISABLED
+                        # (A/B sim 2026-07-15: enabling (w=1, kp=12) made the 45deg
+                        # turn fall at t=5.5s vs t=17.7s without). If re-enabled,
+                        # MUST stay <= ~2: stiffer fights the gait's base-yaw
+                        # oscillation + AM task and destabilizes straight walking
 w_feet_contact = 1e5    # weight of foot in contact (negative means infinite weight)
 w_hand_contact = 1e5    # weight for hand in contact
 w_posture = 1e-3        # weight of joint posture task
@@ -90,6 +95,8 @@ kp_hand_rh = 10.0
 kp_hand_lh = 10.0
 kp_torso = 20.0         # proportional gain of torso task (raised from 10 to track the
                         # commanded heading more tightly during turns)
+kp_base = 12.0          # proportional gain of the base (pelvis) yaw task (soft bias
+                        # so the pelvis shares the turn with the waist/torso)
 kp_com = 10.0           # proportional gain of com task
 kp_am = 10.0            # proportional gain of angular momentum task
 

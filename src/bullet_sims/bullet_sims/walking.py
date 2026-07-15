@@ -57,6 +57,14 @@ REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MOD
 TURN_GAIN = 0.0            # fraction of the heading error turned per step
 MAX_DYAW_DEG = 6.0         # [deg] max facing change per step
 
+# touchdown detection from the swing foot's FT sensor: once its measured normal
+# force exceeds this in the descent half of the step, the swing reference is
+# FROZEN at its current pose -- otherwise an early contact makes the motion task
+# keep driving the foot along the spline into the ground, loading a sole edge
+# and tilting the foot. Must stay above the sensed swing-leg foot weight
+# (~25-30 N). Set to 0 to disable.
+TOUCHDOWN_FZ = 75.0        # [N]
+
 # ---- runtime parameters (defaults; override at launch via ROS 2 params, e.g.
 #   ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=true )
 SCENARIO = "random"              # crowd scenario: head_on | crossing | circle | corridor | random
@@ -434,6 +442,8 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         np.zeros(2))                             # seed the buffer until the first step
     v_cmd_acc = np.zeros(2)                      # v_cmd sum since the last step
     v_cmd_n = 0                                  # ... and its sample count
+    swing_frozen = False                         # touchdown detected this step
+    T_frozen = None                              # swing pose held after touchdown
 
     for i in range(-N_pre, N_sim):
         t = i * conf.dt
@@ -519,6 +529,8 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             T1_swing = next_step.poseInWorld()
             swing_trajectory = SwingFootTrajectory(T0_swing, T1_swing, conf.step_dur)
             t_step_elapsed = 0.0
+            swing_frozen = False
+            T_frozen = None
             heading_des = np.arctan2(next_step.pose.rotation[1, 0],
                                      next_step.pose.rotation[0, 0])
 
@@ -554,10 +566,28 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             interpolator.integrate(u_k)
             c, c_dot, c_ddot = interpolator.comState()
             robot.stack.setComRefState(c, c_dot, c_ddot)
-            # evaluate the swing-foot spline and update its motion reference
+            # evaluate the swing-foot spline and update its motion reference.
+            # Touchdown detection: in the descent half of the step, once the
+            # swing foot's FT sensor reports ground contact, FREEZE the
+            # reference at the current pose -- continuing the spline would
+            # drive the foot into the ground and tilt it about a sole edge.
             if swing_trajectory is not None:
-                T_swing, V_swing, A_swing = swing_trajectory.evaluate(t_step_elapsed)
-                robot.updateSwingFootRef(T_swing, V_swing.vector, A_swing.vector)
+                if (TOUCHDOWN_FZ > 0 and not swing_frozen
+                        and t_step_elapsed > 0.5 * conf.step_dur):
+                    swing_frame = (conf.lf_frame_name if robot.swing_foot == Side.LEFT
+                                   else conf.rf_frame_name)
+                    f_swing, _ = robot._foot_wrench_world(swing_frame)
+                    if f_swing[2] > TOUCHDOWN_FZ:
+                        swing_frozen = True
+                        T_frozen, _, _ = swing_trajectory.evaluate(t_step_elapsed)
+                        print(f"[touchdown] early contact: t_step="
+                              f"{t_step_elapsed:.2f}s Fz={f_swing[2]:.0f}N "
+                              "-> swing ref frozen")
+                if swing_frozen:
+                    robot.updateSwingFootRef(T_frozen, np.zeros(6), np.zeros(6))
+                else:
+                    T_swing, V_swing, A_swing = swing_trajectory.evaluate(t_step_elapsed)
+                    robot.updateSwingFootRef(T_swing, V_swing.vector, A_swing.vector)
 
             # steer the torso toward the desired heading (fixed in omnidirectional
             # walking; only turns if the footsteps carry yaw)

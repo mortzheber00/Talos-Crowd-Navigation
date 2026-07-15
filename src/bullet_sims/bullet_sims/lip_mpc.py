@@ -140,6 +140,12 @@ class LIPMPC:
         # much larger values (~1e3) ill-condition the Hessian.
         self.beta = getattr(conf, 'beta', 100.0)
 
+        # safety margin [m] shrinking the ZMP/CoP feasibility box inside the
+        # sole: a commanded ZMP on the exact sole edge means any model error
+        # puts the true CoP AT the edge, i.e. the foot starts rolling/tilting
+        # about it.
+        self.zmp_margin = getattr(conf, 'zmp_margin', 0.02)
+
         # solution and references over the horizon
         self.X_k = None
         self.U_k = None
@@ -185,10 +191,13 @@ class LIPMPC:
         # The commanded ZMP must stay within the foot under the support, which we
         # express as a box around the per-step ZMP reference (the stance foot
         # center). lfxp/lfxn are the fore/aft half-lengths, lfyp/lfyn the lateral.
-        lfxp = self.conf.lfxp
-        lfxn = self.conf.lfxn
-        lfyp = self.conf.lfyp
-        lfyn = self.conf.lfyn
+        # shrunk by zmp_margin so the commanded ZMP never sits on the sole edge
+        # (>= 5 mm of box always kept, in case of extreme margins)
+        m = self.zmp_margin
+        lfxp = max(self.conf.lfxp - m, 0.005)
+        lfxn = max(self.conf.lfxn - m, 0.005)
+        lfyp = max(self.conf.lfyp - m, 0.005)
+        lfyn = max(self.conf.lfyn - m, 0.005)
 
         prog = MathematicalProgram()
 

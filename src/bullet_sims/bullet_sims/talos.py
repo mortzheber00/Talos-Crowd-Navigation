@@ -136,13 +136,55 @@ class Talos:
             self._has_depth_cam = False
 
         ########################################################################
+        # surround perception cameras (obstacle tracking only, no ROS topic)
+        ########################################################################
+        # Four wide-angle depth+seg cameras yawed 0/90/180/270 deg give full
+        # 360 deg coverage: fovy=90 at 4:3 -> ~106 deg horizontal each, vs the
+        # 90 deg spacing. Each camera sits at the RGB-D sensor height, pushed
+        # 0.15 m outward along its own view direction -- inside that radius
+        # the head mesh swallows the view entirely (verified empirically: a
+        # camera at the head center renders 0 pedestrian pixels). The ~0.15 m
+        # mount spread is negligible against pedestrian distances, so
+        # multi-camera observations of the same pedestrian still merge as if
+        # seen by a single omnidirectional camera. Lower resolution than the
+        # RGB-D cam keeps the 4x render cost at the perception rate affordable.
+        self._percep_cams = []           # camera names used by update_obstacles
+        self._percep_K = {}              # per-camera intrinsics
+        percep_fovy, percep_w, percep_h = 90.0, 320, 240
+        percep_radial = 0.15             # [m] mount offset along the view dir
+        if self._has_depth_cam:
+            try:
+                for k in range(4):
+                    name = f'percep_cam_{k}'
+                    yaw = k * np.pi / 2.0
+                    self.sim.addCameraToLink(
+                        self.camera_parent_link, name=name,
+                        pos=[percep_radial * np.cos(yaw),
+                             percep_radial * np.sin(yaw),
+                             self.camera_pos[2]],
+                        orientation=None, yaw=yaw,
+                        fovy=percep_fovy, width=percep_w, height=percep_h,
+                    )
+                    self._percep_cams.append(name)
+                    self._percep_K[name] = self._pinhole_K(
+                        percep_fovy, percep_w, percep_h)
+                print(f'[Talos] {len(self._percep_cams)} Rundumsicht-Kameras '
+                      f'an {self.camera_parent_link} montiert')
+            except Exception as e:
+                print(f'[Talos] Fehler: Rundumsicht-Kameras nicht verfügbar, '
+                      f'nutze nur die Frontkamera: {e}')
+                self._percep_cams = ['rgbd_depth_cam']
+                self._percep_K = {'rgbd_depth_cam': self.K}
+
+        ########################################################################
         # 2D obstacle tracking (segmentation-based, for ORCA)
         ########################################################################
         # Tracks are keyed by geom NAME, not id: model recompiles renumber the
         # ids, names stay stable.
         self._obstacle_geom_names = []   # set via set_obstacle_geoms()
         self._obstacles = {}             # name -> dict(id,x,y,r,vx,vy,stale,t)
-        self._obs_ema_alpha = 0.3        # velocity EMA smoothing factor
+        self._obs_ema_alpha = 0.15       # velocity EMA smoothing factor
+        self._obs_pos_alpha = 0.5        # center-position EMA smoothing factor
         self._obs_last_t = None          # sim time of the previous update
         self.MIN_OBSTACLE_PIXELS = 30    # below this a mask counts as occluded
         self.OBSTACLE_STALE_TIMEOUT = 1.0  # [s] drop tracks unseen longer than this
@@ -288,25 +330,25 @@ class Talos:
             markers.markers.append(self._point_marker(now, 1, self.dcm, [0.0, 0.0, 1.0, 1.0]))
         self._zmp_pub.publish(markers)
 
-    def _compute_camera_intrinsics(self):
-        """
-        Uses the vertical field of view (fovy) to compute focal length:
-        fy = (height / 2) / tan(fovy_rad / 2)
-        Assumes square pixels, so fx = fy.
-        Principal point is at the image center.
-        """
-        fovy_rad = np.radians(self.depth_fovy)
-        fy = (self.depth_height / 2.0) / np.tan(fovy_rad / 2.0)
-        fx = fy  # Assume square pixels
-        cx = self.depth_width / 2.0
-        cy = self.depth_height / 2.0
-
-        # Intrinsic matrix K (3x3)
-        self.K = np.array([
-            [fx, 0.0, cx],
-            [0.0, fy, cy],
+    @staticmethod
+    def _pinhole_K(fovy_deg, width, height):
+        """Pinhole intrinsics from the vertical field of view:
+        fy = (height / 2) / tan(fovy_rad / 2), square pixels (fx = fy),
+        principal point at the image center."""
+        fy = (height / 2.0) / np.tan(np.radians(fovy_deg) / 2.0)
+        return np.array([
+            [fy, 0.0, width / 2.0],
+            [0.0, fy, height / 2.0],
             [0.0, 0.0, 1.0]
         ], dtype=np.float64)
+
+    def _compute_camera_intrinsics(self):
+        """Intrinsic (K), projection (P) and distortion (D) parameters of the
+        front RGB-D camera, for the ROS CameraInfo publisher."""
+        self.K = self._pinhole_K(self.depth_fovy, self.depth_width,
+                                 self.depth_height)
+        fx, fy = self.K[0, 0], self.K[1, 1]
+        cx, cy = self.K[0, 2], self.K[1, 2]
 
         # Projection matrix P (3x4) for monocular camera
         self.P = np.array([
@@ -424,40 +466,66 @@ class Talos:
 
     def update_obstacles(self):
         """Extract (x, y, r, vx, vy) per tracked cylinder from one aligned
-        depth + segmentation render. Call at the perception rate (~30 Hz).
+        depth + segmentation render of every surround perception camera.
+        Call at the perception rate (~30 Hz).
 
-        Pipeline: segmentation mask per geom id -> pinhole unprojection with K
-        -> transform to world -> ground-plane centroid + radius -> per-track
-        finite-difference velocity smoothed with an EMA.
+        Pipeline (per camera): segmentation mask per geom id -> pinhole
+        unprojection with that camera's K -> transform to world. The cameras
+        share one mount point, so the merged per-geom point sets behave like
+        the view of a single omnidirectional camera -> ground-plane centroid +
+        radius -> per-track finite-difference velocity smoothed with an EMA.
         """
-        if not self._has_depth_cam or not self._obstacle_geom_names:
+        if not self._percep_cams or not self._obstacle_geom_names:
             return self._obstacles
 
         t_now = self.sim.simTime()
         dt = None if self._obs_last_t is None else (t_now - self._obs_last_t)
         self._obs_last_t = t_now
 
-        depth, seg = self.sim.get_depth_and_seg_image(invalid_to=np.nan)
-        cam_pos, R_wc = self.sim.get_camera_pose()
-        # MuJoCo cameras look along local -Z with +Y up; the pinhole equations
-        # below use the ROS optical convention (+Z forward, +Y down), so flip
-        # the Y and Z axes of the camera rotation.
-        R_w_opt = R_wc @ np.diag([1.0, -1.0, -1.0])
+        geom_ids = {name: self.sim.getGeomId(name)   # per frame: survives recompiles
+                    for name in self._obstacle_geom_names}
 
-        fx, fy = self.K[0, 0], self.K[1, 1]
-        cx, cy = self.K[0, 2], self.K[1, 2]
-        valid = np.isfinite(depth)
-        geom_pixels = seg[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM)
+        # --- gather world-frame ground points per geom from every camera ---
+        pts = {name: [] for name in geom_ids}    # world-xy arrays
+        clip = {name: [] for name in geom_ids}   # FOV-clipped in that camera?
+        cam_xy = None                            # shared mount point (ground)
+        for cam in self._percep_cams:
+            depth, seg = self.sim.get_depth_and_seg_image(invalid_to=np.nan,
+                                                          camera=cam)
+            cam_pos, R_wc = self.sim.get_camera_pose(camera=cam)
+            cam_xy = cam_pos[:2]
+            # MuJoCo cameras look along local -Z with +Y up; the pinhole
+            # equations below use the ROS optical convention (+Z forward,
+            # +Y down), so flip the Y and Z axes of the camera rotation.
+            R_w_opt = R_wc @ np.diag([1.0, -1.0, -1.0])
 
-        for name in self._obstacle_geom_names:
-            gid = self.sim.getGeomId(name)   # per frame: survives recompiles
-            mask = (seg[..., 0] == gid) & geom_pixels & valid
+            K = self._percep_K[cam]
+            fx, fy = K[0, 0], K[1, 1]
+            cx, cy = K[0, 2], K[1, 2]
+            valid = np.isfinite(depth)
+            geom_pixels = seg[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM)
+
+            for name, gid in geom_ids.items():
+                mask = (seg[..., 0] == gid) & geom_pixels & valid
+                if not mask.any():
+                    continue
+                v_pix, u_pix = np.nonzero(mask)      # rows = v, cols = u
+                Z = depth[mask]                      # eye-space z: pinhole-ready
+                X = (u_pix - cx) * Z / fx            # optical frame, +X right
+                Y = (v_pix - cy) * Z / fy            # +Y down
+                pts_w = (R_w_opt @ np.vstack((X, Y, Z))).T + cam_pos
+                pts[name].append(pts_w[:, :2])       # ground-plane projection
+                clip[name].append(u_pix.min() == 0
+                                  or u_pix.max() == depth.shape[1] - 1)
+
+        # --- per-geom estimation on the merged point sets ---
+        for name, gid in geom_ids.items():
             prev = self._obstacles.get(name)
 
-            if int(mask.sum()) < self.MIN_OBSTACLE_PIXELS:
-                # occluded or out of view: hold the last estimate briefly, then
-                # drop the track -- a frozen estimate fed to ORCA forever acts
-                # as a phantom obstacle blocking the robot's path. While held,
+            if sum(len(p) for p in pts[name]) < self.MIN_OBSTACLE_PIXELS:
+                # occluded: hold the last estimate briefly, then drop the
+                # track -- a frozen estimate fed to ORCA forever acts as a
+                # phantom obstacle blocking the robot's path. While held,
                 # treat it as static: extrapolating the last velocity places
                 # the ORCA half-plane where the agent no longer is.
                 if prev is not None:
@@ -468,19 +536,14 @@ class Talos:
                         prev['vx'] = prev['vy'] = 0.0
                 continue
 
-            v_pix, u_pix = np.nonzero(mask)          # rows = v, cols = u
-            Z = depth[mask]                          # eye-space z: pinhole-ready
-            X = (u_pix - cx) * Z / fx                # optical frame, +X right
-            Y = (v_pix - cy) * Z / fy                # +Y down
-            pts_w = (R_w_opt @ np.vstack((X, Y, Z))).T + cam_pos
-            xy = pts_w[:, :2]                        # ground-plane projection
+            xy = np.vstack(pts[name])
 
             centroid = xy.mean(axis=0)
-            # The camera only sees the front arc of the cylinder, whose
+            # The cameras only see the front arc of the cylinder, whose
             # centroid sits ~2r/pi in front of the true axis. Estimate r from
             # the lateral chord (immune to that bias), then push the center
-            # away from the camera along the viewing ray.
-            ray = centroid - cam_pos[:2]
+            # away from the mount point along the viewing ray.
+            ray = centroid - cam_xy
             ray /= max(np.linalg.norm(ray), 1e-9)
             lateral = xy @ np.array([-ray[1], ray[0]])
             r_est = 0.5 * (lateral.max() - lateral.min())
@@ -490,14 +553,16 @@ class Talos:
                                 float(np.max(np.linalg.norm(xy - center, axis=1))))
             # Partial visibility makes the chord underestimate r -- and an
             # underestimated radius is unsafe for ORCA. Two guards:
-            #  * mask touches the left/right image border (FOV-clipped):
+            #  * every contributing mask touches its left/right image border
+            #    (adjacent cameras overlap at the seams, so a genuinely
+            #    complete arc is never border-clipped in ALL views):
             #    hold the previous radius outright;
             #  * otherwise limit shrinking to 1% per frame, so a sliver left
             #    by a passing occluder cannot collapse the radius before the
             #    mask drops below MIN_OBSTACLE_PIXELS (-> stale hold). A rigid
             #    agent's radius never genuinely shrinks that fast.
             if prev is not None:
-                if u_pix.min() == 0 or u_pix.max() == depth.shape[1] - 1:
+                if all(clip[name]):
                     radius = max(radius, prev['r'])
                 else:
                     radius = max(radius, 0.99 * prev['r'])
@@ -505,6 +570,17 @@ class Talos:
             if prev is None or dt is None or dt <= 0.0:
                 vx = vy = 0.0                        # first sighting: EMA starts next frame
             else:
+                # Smooth the center estimate itself: pixel quantisation plus
+                # the swaying camera mount put ~1 cm of frame-to-frame noise on
+                # the raw center, which the finite difference below would blow
+                # up into ~0.3 m/s velocity noise -- enough to make the ORCA
+                # half-planes (and with them v_cmd) flip sides erratically.
+                # Skip the blend for re-emerging stale tracks, whose position
+                # may genuinely have jumped.
+                if not prev['stale']:
+                    b = self._obs_pos_alpha
+                    center = b * center + (1.0 - b) * np.array([prev['x'],
+                                                                prev['y']])
                 v_raw = (center - np.array([prev['x'], prev['y']])) / dt
                 # position jumps when a track re-emerges from behind an
                 # occluder; clamp to human-plausible speeds before smoothing

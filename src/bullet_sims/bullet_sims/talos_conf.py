@@ -117,7 +117,10 @@ step_size_y = 0.096             # step size in y direction
 
 # lip settings
 g = 9.81                        # gravity magnitude
-h = 0.85                        # walking height
+# walking height: 0.85 leaves no leg reserve once the hips carry yaw twist in
+# turns - the robot rides up on the stance leg, unloads the contact and the
+# ZMP loses authority. 0.82 keeps the knees bent through turning steps.
+h = 0.82
 
 # mpc settings
 dt_mpc = 0.1                                            # sampling time interval for the mpc
@@ -135,4 +138,30 @@ gamma       = 10**(-3)          # VEL smoothing cost
 
 no_sim_per_mpc = int(round(dt_mpc / dt))        # number of sim between mpc update
 no_sim_per_step = int(round(step_dur / dt))     # number of sim between foot steps
+
+# reactive turning gait (ReactiveFootStepPlanner with (v_x, v_y, omega_z) input)
+step_dur_max = step_dur         # nominal/maximum step duration [s]
+# fastest step [s], must be a multiple of dt_mpc. Turning gaits need the FULL
+# 0.8 s step for the lateral weight transfer; the old 0.7 s "tight turns get
+# faster steps" heuristic starved the transfer and the 0.2 m/s circle fell
+# within a few steps (0.8 everywhere is stable).
+step_dur_min = 0.8
+min_foot_sep = 0.19             # no-crossing: min lateral foot separation [m]
+max_foot_sep = 0.35             # kinematic limit on lateral foot spread [m]
+omega_max = 0.25                # clamp on commanded yaw rate [rad/s]
+max_dyaw_per_step = 0.18        # max yaw delta per step [rad]
+step_height = 0.09              # nominal swing-foot apex height [m]
+heading_kp = 1.0                # P gain of the heading controller
+heading_v_deadband = 0.05       # below this speed no turning is commanded [m/s]
+v_back_max = 0.15               # max backward walking speed in the body frame [m/s]
+v_lat_max = 0.15                # max lateral walking speed in the body frame [m/s]
+max_foot_reach = 0.40           # max distance of a foot target from the support foot [m]
+# CoM feedback into the footstep chain: at each step transition the virtual
+# base is pulled a fraction of the way toward the measured CoM (which crosses
+# the base line exactly there, so the signal is sway-free). Without it the
+# footsteps anchor only to the previous feet - open loop w.r.t. the body - and
+# a steady drift (e.g. outward on an arc) saturates the MPC's ZMP box instead
+# of being answered by the steps.
+base_fb_gain = 0.7              # fraction of (com - base) fed into the base seed
+base_fb_max = 0.10              # clamp on the base-seed shift per step [m]
 

@@ -325,11 +325,19 @@ class Robot(Body):
             q = np.concatenate((x_b_w, Q_b_w, q))
 
             # Note: the floating base velocity is expressed in the base frame, not in world!
+            # R_b_w rotates BASE-frame vectors INTO the world frame (it is built
+            # from the base orientation), so world->base needs the TRANSPOSE.
+            # With R instead of R^T the pinocchio velocity state is rotated by
+            # 2x the base yaw: exactly zero error while the robot keeps its
+            # spawn heading (straight walking unaffected), but a turning gait
+            # gets its whole-body damping applied in an increasingly wrong
+            # direction and falls once ~0.5 rad of heading have accumulated.
             R_b_w = np.array(mjw.getMatrixFromQuaternion(Q_b_w)).reshape((3, 3))
 
             # floating base qP = [xP, omega, qP_0, ..., qP_n]
             XP_com_w = self.baseWorldVelocity()
-            v = np.concatenate((R_b_w.dot(XP_com_w[:3]), R_b_w.dot(XP_com_w[3:]), v))
+            v = np.concatenate((R_b_w.T.dot(XP_com_w[:3]),
+                                R_b_w.T.dot(XP_com_w[3:]), v))
         
         # save internally in pinocchio format
         self._q[self._q_map_pb_pin] = q

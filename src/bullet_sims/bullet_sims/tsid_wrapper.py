@@ -325,6 +325,14 @@ class TSIDWrapper:
         self.torsoTask.setKp(self.conf.kp_torso * np.array([0, 0, 0, 1, 1, 1]))
         self.torsoTask.setKd(2.0 * np.sqrt(self.conf.kp_torso)
                              * np.array([0, 0, 0, 1, 1, 1]))
+        # NOTE: the yaw component is safety-critical in turning gaits. The hip
+        # yaw joints are asymmetric and tight (leg_right_1: [-1.571, +0.349],
+        # leg_left_1 mirrored) and TSID runs WITHOUT joint position bounds
+        # (w_joint_bounds = 0) while the simulator enforces them hard - if the
+        # trunk yaw lags the feet by ~0.2 rad, a turning step slams the hip
+        # yaw into its limit and the robot falls. The walking loop therefore
+        # slaves the torso yaw reference to the measured mean foot yaw, which
+        # keeps the hip yaw joints centred between their limits.
         formulation.addMotionTask(self.torsoTask, self.conf.w_torso, 1, 0.0)
 
         # torso reference is current

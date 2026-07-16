@@ -2,6 +2,7 @@
 talos walking simulation
 """
 
+import os
 from types import SimpleNamespace
 
 import numpy as np
@@ -23,7 +24,8 @@ from bullet_sims.footstep_planner import Side, FootStepPlanner, FootStep, other_
 from bullet_sims.foot_trajectory import SwingFootTrajectory
 from bullet_sims.talos import Talos
 from bullet_sims.lip_mpc import LIPMPC, LIPInterpolator, generate_zmp_reference, generate_yaw_reference
-from bullet_sims.reactive_footstep_planner import ReactiveFootStepPlanner
+from bullet_sims.reactive_footstep_planner import (ReactiveFootStepPlanner,
+                                                   wrap_angle, yaw_of, rot_z)
 
 # crowd
 from orca_nav.robot_orca import RobotORCA
@@ -56,6 +58,50 @@ REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MOD
 #   ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=true )
 SCENARIO = "random"              # crowd scenario: head_on | crossing | circle | corridor | random
 PEDESTRIAN_SENSOR_DATA = False   # True: depth-camera perception; False: ground-truth states
+# WALK selects what drives the reactive gait:
+#   "goal"   - ORCA velocity toward ROBOT_GOAL, avoiding pedestrians (default)
+#   "circle" - constant twist (CIRCLE_SPEED forward + omega = speed/radius):
+#              the robot walks a circular arc with the feet tangent to it,
+#              ignoring ORCA. E.g.:
+#   ros2 run bullet_sims walking --ros-args -p walk:=circle -p circle_radius:=1.5
+WALK = "circle"
+CIRCLE_SPEED = 0.3               # [m/s] forward speed on the circle
+# USE_HEADING toggles the whole heading integration (runtime: -p use_heading:=false):
+#   True  - the robot turns into its direction of travel: HeadingController
+#           yields omega_z, footsteps/torso yaw with the path, the MPC's ZMP
+#           box rotates with the support foot.
+#   False - omnidirectional gait: omega_z = 0 everywhere, the feet keep their
+#           spawn yaw and the robot side-steps along curved paths (the old,
+#           pre-heading behavior; also the fallback if turning misbehaves).
+USE_HEADING = True
+
+# reactive walking: per-MPC-tick gain pulling the open-loop LIP interpolator
+# state toward the measured CoM. Must exceed 1 - exp(-omega*dt_mpc) ~ 0.29
+# (the LIP divergence rate per MPC interval), otherwise plan and robot still
+# drift apart exponentially - just more slowly.
+MPC_STATE_FB = 0.5
+MPC_STATE_RESET_DIST = 0.25   # [m] plan/robot CoM gap that forces a hard reset
+# capture stepping: the DCM orbits the support foot by up to ~this radius in a
+# nominal gait; only the excess is treated as a disturbance and stepped toward
+DCM_NOMINAL_RADIUS = 0.12     # [m]
+CAPTURE_STEP_MAX = 0.12       # [m] clamp on the correction at step transitions
+# at a step COMMIT the DCM sits close to the support->next segment in a
+# nominal gait (the big excursions happen mid-step), so the commit-time
+# capture correction uses this tighter deadband
+DCM_COMMIT_RADIUS = 0.08      # [m]
+CAPTURE_RETARGET_MAX = 0.15   # [m] clamp on mid-step swing retargeting
+CAPTURE_RETARGET_CUTOFF = 0.7  # retarget only in the first fraction of the step
+EARLY_CONTACT_FZ = 100.0      # [N] swing-foot load that ends the step early
+# retargeting + early-touchdown are protections for DYNAMIC walking; at low
+# speed (braking, standing at the goal) their signals are ill-conditioned
+# (tiny reference segments, trippling contacts) and plain MPC/ZMP standing -
+# which was always rock solid - takes over. A TURNING gait is always dynamic,
+# regardless of speed: the yaw-rate-proportional disturbances (touchdown yaw
+# error, stance-foot yaw torsion) grow the step-to-step sway mode, and the
+# DCM retargeting is the layer that damps it - so it must stay armed while
+# omega is commanded (a 0.1 m/s circle walk otherwise falls in ~10 steps).
+DYNAMIC_GAIT_SPEED = 0.12     # [m/s] |v_filt| above which they are active
+DYNAMIC_GAIT_OMEGA = 0.01     # [rad/s] |omega_cmd| above which they are active
 
 
 ################################################################################
@@ -72,9 +118,16 @@ def _setup_simulator():
     conf.dt = 1.0 / frequency
     conf.no_sim_per_mpc = int(round(conf.dt_mpc / conf.dt))
     conf.no_sim_per_step = int(round(conf.step_dur / conf.dt))
+    # step transitions are scheduled in multiples of no_sim_per_mpc ticks, which
+    # only lines up with the MPC updates if dt_mpc is an exact multiple of dt
+    assert abs(conf.no_sim_per_mpc * conf.dt - conf.dt_mpc) < 1e-9, \
+        "dt_mpc must be an integer multiple of the sim dt"
 
+    # WALKING_RENDER=0 runs headless (no viewer window, no real-time pacing) -
+    # useful for batch tests/CI where the run should go as fast as possible
+    render = os.environ.get('WALKING_RENDER', '1') not in ('0', 'false', 'False')
     return PybulletWrapper(sim_rate=frequency, num_solver_iterations=50,
-                           num_sub_steps=8, render=True)
+                           num_sub_steps=8, render=render)
 
 
 def _setup_crowd(simulator):
@@ -153,6 +206,9 @@ def _allocate_logs(N_sim, n_peds=0):
         DIST_GOAL=nan(N_sim),                   # robot distance to goal [m]
         VCMD=nan(N_sim, 2),                     # ORCA velocity command
         VPREF=nan(N_sim, 2),                    # goal-direction preferred velocity
+        OMEGA_CMD=nan(N_sim),                   # heading-controller yaw-rate command
+        STEP_DUR=nan(N_sim),                    # committed step duration [s]
+        HEADING=nan(N_sim),                     # planner heading (support-foot yaw)
         GOAL=np.asarray((0.0, 0.0)),            # filled in _run_loop
         PED_RADII=np.zeros(max(n_peds, 1)),     # filled in _run_loop
         # CoM position/velocity/acceleration: reference (LIP), pinocchio, pybullet
@@ -171,6 +227,10 @@ def _allocate_logs(N_sim, n_peds=0):
         # normal foot forces: pybullet ft sensor vs pinocchio qp
         FZ_LEFT_PB=nan(N_sim), FZ_RIGHT_PB=nan(N_sim),
         FZ_LEFT_PIN=nan(N_sim), FZ_RIGHT_PIN=nan(N_sim),
+        # yaw chain: pelvis yaw, hip-yaw joints (left q[7], right q[13]),
+        # torso_1 joint - hip yaw limits are the hard constraint in turning
+        # (leg_right_1: [-1.571, +0.349], leg_left_1: [-0.349, +1.571])
+        YAW_CHAIN=nan(N_sim, 4),
         TIME=nan(N_sim),
     )
 
@@ -200,6 +260,12 @@ def _record_step(L, i, t, c, c_dot, c_ddot, t_step_elapsed, swing_trajectory,
     q, v = robot.robot.q(), robot.robot.v()
     hg = pin.computeCentroidalMomentum(robot.stack.model, pin_data, q, v)
     L.ANG_MOM_PIN[i] = hg.angular
+
+    # yaw chain: base yaw from the free-flyer quaternion + hip/torso yaw joints
+    qw, qx, qy, qz = q[6], q[3], q[4], q[5]
+    base_yaw = np.arctan2(2.0 * (qw * qz + qx * qy),
+                          1.0 - 2.0 * (qy * qy + qz * qz))
+    L.YAW_CHAIN[i] = (base_yaw, q[7], q[13], q[19])
 
     # foot poses / velocities from pinocchio (acc needs the qp dv -> nan)
     H_lf, v_lf = robot.stack.get_pose_vel_acc_LF()
@@ -313,7 +379,8 @@ def _plot_navigation(L):
     import matplotlib.pyplot as plt
 
     fig, axd = plt.subplot_mosaic([['traj', 'sep'],
-                                   ['traj', 'prog']], figsize=(14, 7))
+                                   ['traj', 'turn'],
+                                   ['traj', 'prog']], figsize=(14, 9))
 
     # --- top-down trajectory ---
     ax = axd['traj']
@@ -340,6 +407,17 @@ def _plot_navigation(L):
     ax.axhline(0.0, color='tab:red', ls='--', lw=1, label='contact (gap=0)')
     ax.set_title('Distance to nearest pedestrian (surface gap)')
     ax.set_ylabel('gap [m]'); ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+
+    # --- turn command + step cadence ---
+    ax = axd['turn']
+    ax.plot(L.TIME, L.OMEGA_CMD, color='tab:blue', lw=1, label='omega_cmd')
+    ax.set_ylabel('omega [rad/s]', color='tab:blue')
+    ax.grid(True, alpha=0.3)
+    ax2 = ax.twinx()
+    ax2.step(L.TIME, L.STEP_DUR, color='tab:red', lw=1, where='post',
+             label='step duration')
+    ax2.set_ylabel('step dur [s]', color='tab:red')
+    ax.set_title('Turn command and step cadence')
 
     # --- progress to goal + command speed ---
     ax = axd['prog']
@@ -376,6 +454,101 @@ def _plot_navigation(L):
 # main control loop
 ################################################################################
 
+class HeadingController:
+    """P controller that turns the robot into its direction of travel.
+
+    ORCA outputs only a planar velocity; this derives the yaw-rate command
+    omega_z = kp * wrap(atan2(v_y, v_x) - heading) for the footstep planner.
+    Below the speed deadband no turning is commanded (the robot never
+    spins in place from noise while stopping/at the goal).
+
+    The velocity is low-pass filtered first: the raw ORCA command jitters
+    tick-to-tick (the walking CoM sway feeds back into the avoidance solver),
+    and unfiltered that noise saturates omega with alternating sign - the
+    per-step sampled command then yaws the feet in a destabilising zigzag.
+    """
+
+    def __init__(self, dt, kp=None, omega_max=None, v_deadband=None, tau=0.4,
+                 a_max=0.4, domega_max=0.5, enabled=True):
+        self.kp = conf.heading_kp if kp is None else kp
+        self.omega_max = conf.omega_max if omega_max is None else omega_max
+        self.v_deadband = conf.heading_v_deadband if v_deadband is None else v_deadband
+        self.alpha = float(np.clip(dt / tau, 0.0, 1.0))   # EMA gain per tick
+        self.dv_max = a_max * dt                          # slew limit per tick
+        self.domega_max = domega_max * dt                 # omega slew per tick
+        self.enabled = enabled                            # False -> never turn
+        self.v_filt = np.zeros(2)
+        self.heading_err = 0.0
+        self.omega_out = 0.0
+
+    def compute(self, v_cmd, heading):
+        # EMA against tick noise, then a hard slew limit: a biped cannot jump
+        # its velocity, and ORCA emits step changes (0.25 -> 0.4 m/s) exactly
+        # in the tightest moments
+        dv = self.alpha * (np.asarray(v_cmd, dtype=float)[:2] - self.v_filt)
+        dv_norm = float(np.hypot(*dv))
+        if dv_norm > self.dv_max:
+            dv *= self.dv_max / dv_norm
+        self.v_filt += dv
+        speed = float(np.hypot(*self.v_filt))
+        self.heading_err = 0.0
+        if not self.enabled or speed < self.v_deadband:
+            omega_raw = 0.0
+        else:
+            err = wrap_angle(np.arctan2(self.v_filt[1], self.v_filt[0]) - heading)
+            self.heading_err = float(err)
+            omega = np.clip(self.kp * err, -self.omega_max, self.omega_max)
+            # the direction of a slow command is ill-conditioned (ORCA dithers in
+            # front of crowds and atan2 of a small vector swings wildly), so fade
+            # the turning authority in with speed: full turning only when actually
+            # walking somewhere (~3x the deadband)
+            scale = np.clip((speed - self.v_deadband) / (3.0 * self.v_deadband),
+                            0.0, 1.0)
+            omega_raw = float(omega * scale)
+        # slew-limit omega: dodging around a pedestrian, the heading error can
+        # flip sign between consecutive steps, and a per-step-sampled omega
+        # then yaws the feet in an alternating zigzag - the least stable thing
+        # a turning biped can do. The slew turns that into a smooth swing.
+        self.omega_out += np.clip(omega_raw - self.omega_out,
+                                  -self.domega_max, self.domega_max)
+        return self.omega_out
+
+    def v_planner(self):
+        """Velocity the FOOTSTEP planner should follow: stop-and-turn gating.
+
+        Walking fast across the legs while turning (large angle between the
+        commanded direction and the body heading) is the least stable thing a
+        biped can do - so fade the translation out and let the robot turn in
+        place first, then walk. Full speed below 0.5 rad error, zero above 1.0.
+        """
+        gate = float(np.clip(1.0 - (abs(self.heading_err) - 0.5) / 0.5, 0.0, 1.0))
+        return self.v_filt * gate
+
+
+def _capture_excess(com, vcom, sup_xy, next_xy, omega_lip, clamp,
+                    radius=None):
+    """Disturbance part of the measured DCM.
+
+    In a nominal gait the DCM travels from near the support foot toward the
+    next footstep (and sits BETWEEN the feet when stepping in place), i.e. it
+    stays close to the segment support -> next touchdown. Only the excess
+    beyond the nominal orbit radius around that segment is returned (clamped)
+    - where the robot is actually falling toward and the feet should go.
+    """
+    dcm = np.asarray(com)[:2] + np.asarray(vcom)[:2] / omega_lip
+    a = np.asarray(sup_xy, dtype=float)[:2]
+    b = np.asarray(next_xy, dtype=float)[:2]
+    ab = b - a
+    denom = float(ab @ ab)
+    s = float(np.clip((dcm - a) @ ab / denom, 0.0, 1.0)) if denom > 1e-12 else 0.0
+    err = dcm - (a + s * ab)          # DCM offset from the nominal segment
+    err_n = float(np.hypot(*err))
+    excess = err_n - (DCM_NOMINAL_RADIUS if radius is None else radius)
+    if excess <= 0.0 or err_n < 1e-9:
+        return np.zeros(2)
+    return err / err_n * min(excess, clamp)
+
+
 def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref,
               com_start, com_target, N_pre, N_sim):
     """Run the walking simulation loop and return the filled log buffers."""
@@ -396,26 +569,40 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     pin_data = robot.stack.model.createData()   # scratch for centroidal queries
     c = c_dot = c_ddot = None                   # latest com reference
 
-    # torso-yaw tracking: the torso task pins the body's heading, so as the feet
-    # yaw around a turn the legs twist and the robot topples. Command the torso
-    # orientation reference to follow the support-foot heading (low-pass filtered
-    # so the reference is smooth). yaw 0 -> unchanged from the spawn orientation,
-    # so straight walking is unaffected.
+    # torso yaw reference = low-passed circular MEAN of the measured foot yaws.
+    # The hip yaw joints are tight and asymmetric (leg_right_1 caps at +0.349)
+    # and TSID runs without joint position bounds while the simulator enforces
+    # them - so the trunk must track the feet through turns, otherwise the
+    # accumulated pelvis lag (the soft posture task alone leaves ~0.2 rad)
+    # slams a hip yaw joint into its limit mid-step and the robot falls.
+    # Following the MEASURED feet (not the command) means the reference never
+    # leads the gait and moves continuously (the swing foot yaws in flight),
+    # so no per-step reference jumps excite the sway mode. Straight walking:
+    # foot yaws are constant -> constant reference, unchanged behaviour.
     T_torso0, _ = robot.stack.torsoState()
-    R_torso0 = T_torso0.rotation.copy()
     p_torso0 = T_torso0.translation.copy()
-    T_sup0 = robot.supportFootPose()
-    yaw_sup0 = np.arctan2(T_sup0.rotation[1, 0], T_sup0.rotation[0, 0])
-    torso_yaw = 0.0                             # filtered heading (delta from start)
-    heading_des = yaw_sup0                      # desired heading = current step target yaw
-    TORSO_YAW_LP = 0.05                         # low-pass gain per sim step
+    yaw_torso0 = np.arctan2(T_torso0.rotation[1, 0], T_torso0.rotation[0, 0])
+    # spawn roll/pitch with the spawn yaw factored out
+    R_torso0_level = rot_z(-yaw_torso0) @ T_torso0.rotation.copy()
+    yaw_feet_filt = yaw_torso0        # filtered mean foot yaw
+    # slow enough that a touchdown-impact yaw glitch in a measured foot pose
+    # cannot jerk the pelvis, fast enough that the tracking lag omega*tau
+    # stays small against the +-0.35 rad hip-yaw budget
+    TORSO_YAW_TAU = 0.8               # [s] low-pass on the mean foot yaw
 
-    # robot ORCA velocity generator: v_cmd toward the goal, avoiding pedestrians
-    robot_ctrl = RobotORCA(ROBOT_GOAL, radius=0.35, max_speed=0.4,
+    # robot ORCA velocity generator: v_cmd toward the goal, avoiding pedestrians.
+    # max_speed stays close to desired_speed: a biped gains little from faster
+    # evasion bursts but loses balance commanding them mid-turn.
+    robot_ctrl = RobotORCA(ROBOT_GOAL, radius=0.35, max_speed=0.3,
                            desired_speed=0.25, safety_margin=0.2)
+    # heading controller: turns the body into the direction of travel
+    # (disabled -> omega stays 0 and the gait is purely omnidirectional)
+    heading_ctrl = HeadingController(conf.dt, enabled=USE_HEADING)
+    omega_cmd = 0.0
+    circle_psi = yaw_of(robot.supportFootPose())  # path tangent, heading-off circle
 
-    # reactive footstep planner: each step, places the next footstep in the
-    # direction of v_cmd (omnidirectional / fixed facing) and feeds the MPC.
+    # reactive footstep planner: each step, rolls the base along the commanded
+    # (v_cmd, omega_cmd) arc, places the next footstep and feeds the MPC.
     reactive_planner = ReactiveFootStepPlanner(
         conf, ROBOT_GOAL, robot.supportFootPose(),
         conf.no_mpc_samples_per_step, conf.no_mpc_samples_per_horizon)
@@ -423,6 +610,21 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     reactive_planner.regenerate(
         reactive_planner.make_footstep(robot.supportFootPose(), robot.support_foot),
         np.zeros(2))                             # seed the buffer until the first step
+
+    # per-step timing: steps have variable duration (multiples of dt_mpc), so
+    # transitions run off a tick countdown instead of a fixed modulo
+    step_ticks_left = 0                          # 0 -> transition on this tick
+    n_step_samples = conf.no_mpc_samples_per_step
+    step_dur_cur = conf.step_dur                 # committed step duration [s]
+
+    # mid-step swing retargeting: a committed step is otherwise frozen for its
+    # whole duration, so a disturbance can only be answered a full step later -
+    # too slow to catch a fall. The touchdown target is shifted toward the
+    # measured DCM excess while the foot is in flight (blended in smoothly).
+    support_fs = None                            # current support (REACTIVE)
+    swing_delta = np.zeros(2)                    # total touchdown shift [m]
+    retarget_tau0 = None                         # step phase when shifting began
+    early_contact = False                        # swing foot loaded early (latch)
 
     for i in range(-N_pre, N_sim):
         t = i * conf.dt
@@ -444,12 +646,47 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                           for o in robot.obstacles2d()]
         else:
             ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
-        v_cmd = robot_ctrl.compute_velocity(com[:2], vcom[:2], ped_states)
-        v_pref = robot_ctrl.preferred_velocity(com[:2])
+        if WALK == "circle":
+            # constant-twist circle demo: forward along the path tangent plus a
+            # fixed yaw rate -> an arc of radius CIRCLE_SPEED/omega (no ORCA).
+            # With heading ON the feet turn tangent to the arc (planner heading
+            # is the tangent); with heading OFF the feet keep their spawn yaw
+            # and the robot side-steps the arc, so the tangent is integrated
+            # here instead of read back from the footsteps.
+            omega_path = ((-1.0 if CIRCLE_CLOCKWISE else 1.0)
+                          * CIRCLE_SPEED / CIRCLE_RADIUS)
+            if USE_HEADING:
+                psi_path = reactive_planner.heading
+                omega_cmd = omega_path
+            else:
+                psi_path = circle_psi
+                if i >= 0:
+                    circle_psi += omega_path * conf.dt
+                omega_cmd = 0.0
+            v_cmd = CIRCLE_SPEED * np.array([np.cos(psi_path), np.sin(psi_path)])
+            v_pref = v_cmd
+            heading_ctrl.v_filt = v_cmd.copy()   # feeds v_planner()
+            heading_ctrl.heading_err = 0.0
+        else:
+            v_cmd = robot_ctrl.compute_velocity(com[:2], vcom[:2], ped_states)
+            v_pref = robot_ctrl.preferred_velocity(com[:2])
+            # yaw-rate command: turn into the direction of travel; feedback is
+            # the planner heading (support-foot yaw) - what the feet committed
+            # to. Returns 0 (no turning) when USE_HEADING is off.
+            omega_cmd = heading_ctrl.compute(v_cmd, reactive_planner.heading)
+        robot.record_com(com)                   # CoM trail for the viewer overlay
+
+        # --- fall detection: CoM below any plausible walking height ---
+        if i >= 0 and com[2] < 0.60:
+            print(f"[nav] ROBOT FELL at t={t:.2f}s (com_z={com[2]:.2f}); aborting walk")
+            break
 
         # --- navigation logging ---
         if i >= 0:
             L.ROBOT_XY[i] = com[:2]
+            L.OMEGA_CMD[i] = omega_cmd
+            L.STEP_DUR[i] = step_dur_cur
+            L.HEADING[i] = reactive_planner.heading
             for j, (p, _, r) in enumerate(ped_states):
                 L.PED_XY[i, j] = np.asarray(p, dtype=float)[:2]
             gaps = [np.hypot(*(com[:2] - np.asarray(p, float)[:2])) - ROBOT_RADIUS_PHYS - r
@@ -469,23 +706,80 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         ) if a is not None]
         goal_marker = debug_viz.point_marker(ROBOT_GOAL, z=0.15, radius=0.12,
                                              rgba=(1.0, 0.2, 0.2, 1.0))
-        # yellow foot-shaped box at the next planned footstep
+        # yellow foot-shaped box at the next planned footstep, fading blue/red
+        # boxes at the executed footstep history, white spheres for the CoM trail
         boxes = [debug_viz.footstep_box(next_step)] if next_step is not None else []
-        debug_viz.draw_scene(simulator, arrows=arrows, points=[goal_marker], boxes=boxes)
+        hist = robot.footstep_history
+        for age, fs in enumerate(reversed(hist)):
+            alpha = 0.5 * (1.0 - age / max(len(hist), 1))
+            color = ((0.2, 0.4, 1.0, alpha) if fs.side == Side.LEFT
+                     else (1.0, 0.3, 0.2, alpha))
+            boxes.append(debug_viz.footstep_box(fs, rgba=color))
+        points = [goal_marker]
+        points += [debug_viz.point_marker(p[:2], z=0.02, radius=0.02,
+                                          rgba=(1.0, 1.0, 1.0, 0.5))
+                   for p in robot.com_trail]
+        debug_viz.draw_scene(simulator, arrows=arrows, points=points, boxes=boxes)
+
+        # --- early touchdown: if the swing foot hits the ground in the late
+        #     swing phase, end the step NOW instead of commanding the foot
+        #     through the floor (that contact fight shoves the robot over).
+        #     Force spikes are latched every tick; the actual switch happens on
+        #     the next MPC tick so the transition stays MPC-aligned.
+        dynamic_gait = (np.hypot(*heading_ctrl.v_filt) > DYNAMIC_GAIT_SPEED
+                        or abs(omega_cmd) > DYNAMIC_GAIT_OMEGA)
+        if (REACTIVE and i >= 0 and swing_trajectory is not None
+                and step_ticks_left > 0
+                and t_step_elapsed > 0.6 * step_dur_cur
+                and dynamic_gait):
+            fname = (conf.lf_frame_name if robot.swing_foot == Side.LEFT
+                     else conf.rf_frame_name)
+            f_sw, _ = robot._foot_wrench_world(fname)
+            if f_sw[2] > EARLY_CONTACT_FZ:
+                early_contact = True
+            if early_contact and i % conf.no_sim_per_mpc == 0:
+                step_ticks_left = 0
 
         # --- step transition: pick/plan the next footstep, build swing spline ---
-        if i >= 0 and i % conf.no_sim_per_step == 0:
+        if i >= 0 and step_ticks_left == 0:
             if REACTIVE:
-                # plan the next step in the direction of v_cmd (steps in place at goal)
+                # plan the next step along the (v_cmd, omega_cmd) arc (steps in
+                # place at goal); the planner also picks the step duration
                 swing_side = current_swing_side
                 support_side = other_foot_id(swing_side)
                 robot.setSwingFoot(swing_side)
                 robot.setSupportFoot(support_side)
                 support_fs = reactive_planner.make_footstep(
                     robot.supportFootPose(), support_side)
-                at_goal = reactive_planner.at_goal(com[:2])
-                reactive_planner.regenerate(support_fs, v_cmd, at_goal)
+                at_goal = (False if WALK == "circle"
+                           else reactive_planner.at_goal(com[:2]))
+                # plan from the low-pass-filtered velocity: the raw ORCA
+                # command jumps tick-to-tick and a step samples it only once,
+                # which otherwise makes stride length/direction erratic.
+                # com_xy closes the placement loop around the body (steps
+                # follow the CoM drift instead of only the support-foot chain);
+                # balance corrections happen mid-step (retargeting below).
+                reactive_planner.regenerate(support_fs, heading_ctrl.v_planner(),
+                                            at_goal, omega_cmd=omega_cmd,
+                                            com_xy=com[:2])
+                # capture stepping at the COMMIT: any DCM excess present right
+                # now would otherwise be ignored for a whole step (it grows by
+                # e^(omega*T) ~ 11x per step) before the mid-step retargeting
+                # deadband sees it - step toward it immediately instead
+                if dynamic_gait:
+                    nom_xy = np.asarray(
+                        reactive_planner.swing_target().pose.translation)[:2]
+                    sup_xy = np.asarray(support_fs.pose.translation)[:2]
+                    cap = _capture_excess(com, vcom, sup_xy, nom_xy,
+                                          interpolator.omega, CAPTURE_STEP_MAX,
+                                          radius=DCM_COMMIT_RADIUS)
+                    if np.hypot(*cap) > 1e-9:
+                        reactive_planner.regenerate(
+                            support_fs, heading_ctrl.v_planner(), at_goal,
+                            omega_cmd=omega_cmd, com_xy=com[:2],
+                            first_step_offset=cap)
                 next_step = reactive_planner.swing_target()
+                n_step_samples = reactive_planner.step_samples()
                 current_swing_side = other_foot_id(swing_side)
                 mpc_phase = 0
             else:
@@ -493,15 +787,40 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                 robot.setSwingFoot(next_step.side)
                 robot.setSupportFoot(other_foot_id(next_step.side))
                 plan_idx += 1
+                n_step_samples = conf.no_mpc_samples_per_step
+            step_dur_cur = n_step_samples * conf.dt_mpc
+            # countdown in whole MPC intervals so every transition tick is also
+            # an MPC tick (mpc_phase = 0 is consumed on this same iteration)
+            step_ticks_left = n_step_samples * conf.no_sim_per_mpc
+            robot.record_footstep(next_step)
             T0_swing = robot.swingFootPose()
             T1_swing = next_step.poseInWorld()
-            swing_trajectory = SwingFootTrajectory(T0_swing, T1_swing, conf.step_dur)
+            # raise the swing apex when the foot yaws a lot, so the toes cannot
+            # scuff while the foot rotates
+            dyaw = abs(wrap_angle(yaw_of(T1_swing) - yaw_of(T0_swing)))
+            apex = float(np.clip(
+                conf.step_height + 0.05 * dyaw / conf.max_dyaw_per_step,
+                conf.step_height, conf.step_height + 0.05))
+            swing_trajectory = SwingFootTrajectory(T0_swing, T1_swing,
+                                                   step_dur_cur, height=apex)
             t_step_elapsed = 0.0
-            heading_des = np.arctan2(next_step.pose.rotation[1, 0],
-                                     next_step.pose.rotation[0, 0])
+            swing_delta = np.zeros(2)
+            retarget_tau0 = None
+            early_contact = False
+        if i >= 0:
+            step_ticks_left -= 1
 
         # --- update the mpc every no_sim_per_mpc steps ---
         if i >= 0 and i % conf.no_sim_per_mpc == 0:
+            if REACTIVE:
+                # close the loop: pull the open-loop LIP state toward the
+                # measured CoM so plan and robot cannot drift apart (the
+                # footstep references are anchored to the measured feet)
+                x_meas = np.array([com[0], vcom[0], com[1], vcom[1]])
+                gap = np.hypot(x_meas[0] - interpolator.x[0],
+                               x_meas[2] - interpolator.x[2])
+                interpolator.reanchor(
+                    x_meas, 1.0 if gap > MPC_STATE_RESET_DIST else MPC_STATE_FB)
             x_k = interpolator.x
             if REACTIVE:
                 # ZMP/yaw reference over the horizon from the reactive buffer,
@@ -515,7 +834,49 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                 remaining = len(ZMP_ref) - k
                 terminal_idx = remaining - 1 if remaining < conf.no_mpc_samples_per_horizon else -1
                 k += 1
-            u_k = mpc.buildSolveOCP(x_k, ZMP_ref_k, terminal_idx, yaw_ref_k=YAW_ref_k)
+            try:
+                u_k = mpc.buildSolveOCP(x_k, ZMP_ref_k, terminal_idx,
+                                        yaw_ref_k=YAW_ref_k)
+            except RuntimeError as e:
+                # keep the partial logs/plots for diagnosis instead of crashing
+                print(f"[nav] MPC failed at t={t:.2f}s ({e}); aborting walk")
+                break
+
+        # --- mid-step swing retargeting (every MPC tick, early in the step):
+        #     shift the committed touchdown toward the measured DCM excess so
+        #     a disturbed robot steps under itself NOW, not one step later ---
+        if (REACTIVE and i >= 0 and i % conf.no_sim_per_mpc == 0
+                and support_fs is not None and swing_trajectory is not None
+                and 0.0 < t_step_elapsed < CAPTURE_RETARGET_CUTOFF * step_dur_cur
+                and dynamic_gait):
+            committed_xy = np.asarray(next_step.pose.translation)[:2]
+            # LIVE support pose, not the transition-time snapshot: after an
+            # early touchdown the support foot can still settle/slide for a few
+            # cm, and clamping against its stale pose lets the swing target
+            # cross the legs
+            T_sup_live = robot.supportFootPose()
+            sup_c = np.asarray(T_sup_live.translation)[:2]
+            want = _capture_excess(com, vcom, sup_c, committed_xy,
+                                   interpolator.omega, CAPTURE_RETARGET_MAX)
+            if np.hypot(*(want - swing_delta)) > 0.01:
+                new_xy = committed_xy + want
+                # keep the shifted touchdown kinematically reachable: a target
+                # beyond leg reach never lands, the stance leg overextends and
+                # contact collapses (worse than an imperfect capture point)
+                d = new_xy - sup_c
+                dn = float(np.hypot(*d))
+                if dn > conf.max_foot_reach:
+                    new_xy = sup_c + d * (conf.max_foot_reach / dn)
+                # and bound it by the no-crossing constraint (applied last)
+                yaw_sup = yaw_of(T_sup_live)
+                e_l = np.array([-np.sin(yaw_sup), np.cos(yaw_sup)])
+                sgn = 1.0 if next_step.side == Side.LEFT else -1.0
+                lat = float(e_l @ (new_xy - sup_c))
+                if sgn * lat < conf.min_foot_sep:
+                    new_xy += (conf.min_foot_sep - sgn * lat) * sgn * e_l
+                swing_delta = new_xy - committed_xy
+                if retarget_tau0 is None:
+                    retarget_tau0 = t_step_elapsed / step_dur_cur
 
         # --- references, every iteration ---
         if i < 0:
@@ -532,18 +893,39 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             interpolator.integrate(u_k)
             c, c_dot, c_ddot = interpolator.comState()
             robot.stack.setComRefState(c, c_dot, c_ddot)
-            # evaluate the swing-foot spline and update its motion reference
+            # evaluate the swing-foot spline and update its motion reference;
+            # blend the mid-step retarget shift in smoothly (zero at the phase
+            # where shifting began, full at touchdown - no reference jumps)
             if swing_trajectory is not None:
                 T_swing, V_swing, A_swing = swing_trajectory.evaluate(t_step_elapsed)
-                robot.updateSwingFootRef(T_swing, V_swing.vector, A_swing.vector)
+                if retarget_tau0 is not None:
+                    tau = min(t_step_elapsed / step_dur_cur, 1.0)
+                    u = np.clip((tau - retarget_tau0) / max(1.0 - retarget_tau0, 1e-6),
+                                0.0, 1.0)
+                    s = 3.0 * u**2 - 2.0 * u**3
+                    s_dot = ((6.0 * u - 6.0 * u**2)
+                             / (max(1.0 - retarget_tau0, 1e-6) * step_dur_cur))
+                    V_vec = V_swing.vector.copy()
+                    A_vec = A_swing.vector.copy()
+                    T_swing = pin.SE3(T_swing.rotation, T_swing.translation.copy())
+                    T_swing.translation[:2] += s * swing_delta
+                    V_vec[:2] += s_dot * swing_delta
+                    robot.updateSwingFootRef(T_swing, V_vec, A_vec)
+                else:
+                    robot.updateSwingFootRef(T_swing, V_swing.vector, A_swing.vector)
 
-            # steer the torso toward the desired heading (fixed in omnidirectional
-            # walking; only turns if the footsteps carry yaw)
-            psi_des = (heading_des - yaw_sup0 + np.pi) % (2 * np.pi) - np.pi
-            torso_yaw += TORSO_YAW_LP * (psi_des - torso_yaw)          # low-pass
-            cz, sz = np.cos(torso_yaw), np.sin(torso_yaw)
-            Rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
-            robot.stack.setTorsoRefState(pin.SE3(Rz @ R_torso0, p_torso0))
+            # trunk level (roll/pitch) + yaw tracking the measured mean foot
+            # yaw, so the hip yaw joints stay centred between their limits
+            H_lf, _ = robot.stack.get_pose_vel_acc_LF()
+            H_rf, _ = robot.stack.get_pose_vel_acc_RF()
+            yaw_lf, yaw_rf = yaw_of(H_lf), yaw_of(H_rf)
+            yaw_mean = np.arctan2(np.sin(yaw_lf) + np.sin(yaw_rf),
+                                  np.cos(yaw_lf) + np.cos(yaw_rf))
+            yaw_feet_filt = wrap_angle(
+                yaw_feet_filt + (dt / TORSO_YAW_TAU)
+                * wrap_angle(yaw_mean - yaw_feet_filt))
+            robot.stack.setTorsoRefState(
+                pin.SE3(rot_z(yaw_feet_filt) @ R_torso0_level, p_torso0))
 
         # --- advance the simulation + whole-body control ---
         simulator.step()
@@ -584,15 +966,38 @@ def _read_runtime_params():
         ros2 run bullet_sims walking --ros-args \
             -p scenario:=crossing -p pedestrian_sensor_data:=true
     """
-    global SCENARIO, PEDESTRIAN_SENSOR_DATA
+    global SCENARIO, PEDESTRIAN_SENSOR_DATA, WALK, WALK_DURATION
+    global CIRCLE_RADIUS, CIRCLE_SPEED, CIRCLE_CLOCKWISE, USE_HEADING
     node = rclpy.create_node("walking_params")
     node.declare_parameter("scenario", SCENARIO)
     node.declare_parameter("pedestrian_sensor_data", PEDESTRIAN_SENSOR_DATA)
+    node.declare_parameter("walk", WALK)
+    node.declare_parameter("circle_radius", CIRCLE_RADIUS)
+    node.declare_parameter("circle_speed", CIRCLE_SPEED)
+    node.declare_parameter("circle_clockwise", CIRCLE_CLOCKWISE)
+    node.declare_parameter("use_heading", USE_HEADING)
+    node.declare_parameter("duration", 0.0)    # 0 -> automatic
     SCENARIO = node.get_parameter("scenario").get_parameter_value().string_value
     PEDESTRIAN_SENSOR_DATA = node.get_parameter(
         "pedestrian_sensor_data").get_parameter_value().bool_value
+    WALK = node.get_parameter("walk").get_parameter_value().string_value
+    CIRCLE_RADIUS = node.get_parameter(
+        "circle_radius").get_parameter_value().double_value
+    CIRCLE_SPEED = node.get_parameter(
+        "circle_speed").get_parameter_value().double_value
+    CIRCLE_CLOCKWISE = node.get_parameter(
+        "circle_clockwise").get_parameter_value().bool_value
+    USE_HEADING = node.get_parameter(
+        "use_heading").get_parameter_value().bool_value
+    duration = node.get_parameter("duration").get_parameter_value().double_value
+    if duration > 0.0:
+        WALK_DURATION = duration
+    elif WALK == "circle":
+        # default: one full lap plus some margin
+        WALK_DURATION = 2.0 * np.pi * CIRCLE_RADIUS / max(CIRCLE_SPEED, 1e-3) + 5.0
     node.destroy_node()
-    print(f"[walking] scenario='{SCENARIO}'  "
+    print(f"[walking] scenario='{SCENARIO}'  walk='{WALK}'  "
+          f"duration={WALK_DURATION:.0f}s  use_heading={USE_HEADING}  "
           f"pedestrian_sensor_data={PEDESTRIAN_SENSOR_DATA}")
 
 
@@ -639,6 +1044,17 @@ def main():
     # run the simulation, then plot
     L = _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref,
                   com_start, com_target, N_pre, N_sim)
+    # raw log dump for offline analysis (same dir as the plots)
+    import os
+    plots_dir = os.environ.get(
+        'WALKING_PLOTS_DIR',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plots', 'T7'))
+    try:
+        os.makedirs(plots_dir, exist_ok=True)
+        np.savez_compressed(os.path.join(plots_dir, 'walk_log.npz'), **vars(L))
+        print(f"saved raw logs to {os.path.join(plots_dir, 'walk_log.npz')}")
+    except OSError as e:
+        print(f"could not save raw logs: {e}")
     _plot_navigation(L)
 
     _plot_results(L)

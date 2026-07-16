@@ -95,6 +95,13 @@ class LIPInterpolator:
         self.Ad, self.Bd = discrete_LIP_dynamics(self.dt, self.g, self.h)
         self.u = np.zeros(2)
 
+    def reanchor(self, x_meas, gain):
+        """Blend the internal LIP state toward a measured state
+        [c_x, cdot_x, c_y, cdot_y]. The interpolator is otherwise open loop;
+        without this the planned CoM diverges exponentially from the robot
+        once tracking errors accumulate (e.g. while turning)."""
+        self.x = self.x + gain * (np.asarray(x_meas, dtype=float) - self.x)
+
     def integrate(self, u):
         self.x = self.Ad @ self.x + self.Bd @ u
         self.u = u
@@ -155,9 +162,6 @@ class LIPMPC:
             _type_: control (first commanded ZMP, length-2 np.array [zmp_x, zmp_y])
         """
 
-        nx = 4
-        nu = 2
-
         ZMP_ref_k = np.atleast_2d(np.asarray(ZMP_ref_k, dtype=float))
         n_ref = ZMP_ref_k.shape[0]
         N = min(self.no_samples, n_ref)
@@ -168,6 +172,38 @@ class LIPMPC:
             yaw_arr = np.zeros(n_ref)
         else:
             yaw_arr = np.asarray(yaw_ref_k, dtype=float).ravel()
+
+        result, state, control = self._build_and_solve(
+            x_k, ZMP_ref_k, terminal_idx, yaw_arr, N, soft_terminal=False)
+        if not result.is_success():
+            # The hard terminal capture-point equality can become unreachable
+            # when the measured footstep references drift from the open-loop
+            # LIP state (aggressive turns, touchdown errors). Retry with the
+            # terminal condition as a high-weight cost so the controller keeps
+            # producing a best-effort ZMP instead of aborting the walk.
+            result, state, control = self._build_and_solve(
+                x_k, ZMP_ref_k, terminal_idx, yaw_arr, N, soft_terminal=True)
+        if not result.is_success():
+            raise RuntimeError(
+                "LIPMPC.buildSolveOCP: QP solve failed "
+                f"({result.get_solution_result()})"
+            )
+
+        self.X_k = result.GetSolution(state)
+        self.U_k = result.GetSolution(control)
+        self.ZMP_ref_k = ZMP_ref_k
+
+        return self.U_k[0]
+
+    def _build_and_solve(self, x_k, ZMP_ref_k, terminal_idx, yaw_arr, N,
+                         soft_terminal):
+        """Build the OCP and solve it once. The terminal capture-point
+        condition is a hard equality (nominal) or a high-weight quadratic cost
+        (fallback when the equality is infeasible)."""
+
+        nx = 4
+        nu = 2
+        n_ref = ZMP_ref_k.shape[0]
 
         # ZMP / CoP feasibility box. There is no dedicated zmp_limit constant in
         # talos_conf.py, so derive the bound from the foot footprint half-sizes.
@@ -225,7 +261,7 @@ class LIPMPC:
             # (state layout: [x, xdot, y, ydot]) -> indices 1 and 3
             prog.AddQuadraticCost(gamma * (state[i, 1]**2 + state[i, 3]**2))
 
-        # --- terminal (capture-point) constraint ---
+        # --- terminal (capture-point) condition ---
         if terminal_idx is not None and 0 <= terminal_idx < N:
             t_idx = terminal_idx
         else:
@@ -233,22 +269,17 @@ class LIPMPC:
         ref = ZMP_ref_k[min(t_idx, n_ref - 1)]
         dcm_x = state[t_idx, 0] + state[t_idx, 1] / self.omega
         dcm_y = state[t_idx, 2] + state[t_idx, 3] / self.omega
-        prog.AddLinearConstraint(dcm_x == ref[0])
-        prog.AddLinearConstraint(dcm_y == ref[1])
+        if soft_terminal:
+            beta = 1e3      # >> alpha, so the DCM target still dominates
+            prog.AddQuadraticCost(beta * ((dcm_x - ref[0])**2
+                                          + (dcm_y - ref[1])**2))
+        else:
+            prog.AddLinearConstraint(dcm_x == ref[0])
+            prog.AddLinearConstraint(dcm_y == ref[1])
 
         # --- solve ---
         result = Solve(prog)
-        if not result.is_success():
-            raise RuntimeError(
-                "LIPMPC.buildSolveOCP: QP solve failed "
-                f"({result.get_solution_result()})"
-            )
-
-        self.X_k = result.GetSolution(state)
-        self.U_k = result.GetSolution(control)
-        self.ZMP_ref_k = ZMP_ref_k
-
-        return self.U_k[0]
+        return result, state, control
     
 
 def generate_zmp_reference(foot_steps, no_samples_per_step):

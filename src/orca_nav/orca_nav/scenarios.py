@@ -67,8 +67,14 @@ def random_crowd(crowd, n=12, extent=5.0, min_start_gap=1.0, seed=0):
     return crowd
 
 
+def empty(crowd):
+    """No pedestrians -- clean-gait tests (e.g. the circle-walk demo)."""
+    return crowd
+
+
 # convenience registry so a demo/CLI can pick by name
 REGISTRY = {
+    "empty": empty,
     "head_on": head_on,
     "crossing": crossing,
     "circle": circle,

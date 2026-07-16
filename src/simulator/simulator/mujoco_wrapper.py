@@ -181,8 +181,14 @@ class MujocoWrapper:
         self._start_time = time.time()
         self._time_warp = 1.0
         # High tangential friction so the feet do not slip under the rigid-contact
-        # forces a TSID-style inverse-dynamics controller assumes.
-        self._floor_friction = [2.0, 0.05, 0.001]
+        # forces a TSID-style inverse-dynamics controller assumes. The torsional
+        # coefficient matters for TURNING gaits: the stance foot must react the
+        # trunk/swing-leg yaw moment, and the convex-hull foot meshes give too
+        # few well-spread contact points for tangential friction alone to hold
+        # it - without torsional friction the support foot yaw-slips under the
+        # robot and turning walks fall. 0.03 m x ~450 N ~ 13 Nm, about what a
+        # flat 20 cm foot with mu 0.3 provides. Needs condim=4 (set below).
+        self._floor_friction = [2.0, 0.05, 0.03]
 
         # model building state
         self._spec = mujoco.MjSpec()
@@ -209,6 +215,9 @@ class MujocoWrapper:
             friction=self._floor_friction)
         floor.solref = [0.005, 1.0]           # 5 ms time constant -> stiff
         floor.solimp = [0.95, 0.99, 0.001, 0.5, 2.0]
+        # contact dim 4 = tangential + torsional friction (contact condim is
+        # the max over the two geoms, so setting the floor is enough)
+        floor.condim = 4
         floor.contype = 1                     # collision groups: see createBodyFromUrdf
         floor.conaffinity = 2
 

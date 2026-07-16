@@ -67,8 +67,15 @@ def random_crowd(crowd, n=12, extent=5.0, min_start_gap=1.0, seed=0):
     return crowd
 
 
+def empty(crowd):
+    """No pedestrians at all: an isolated gait test with the crowd/ORCA layer
+    still wired up, so v_cmd comes only from the goal."""
+    return crowd
+
+
 # convenience registry so a demo/CLI can pick by name
 REGISTRY = {
+    "empty": empty,
     "head_on": head_on,
     "crossing": crossing,
     "circle": circle,

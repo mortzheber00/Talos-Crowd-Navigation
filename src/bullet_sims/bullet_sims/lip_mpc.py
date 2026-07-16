@@ -99,6 +99,18 @@ class LIPInterpolator:
         self.x = self.Ad @ self.x + self.Bd @ u
         self.u = u
 
+    def set_state(self, x):
+        """Re-seed the LIP state [x, xdot, y, ydot], e.g. from the MEASURED CoM.
+
+        Needed to CLOSE THE LOOP. self.x was otherwise written exactly twice --
+        once at construction and once by integrate() -- so the interpolator was a
+        free-running simulation that never saw the robot, and walking.py fed its
+        state straight back to the MPC as x_k. LIP-vs-robot model error then had
+        nothing to correct it and integrated without bound. See MPC_STATE_FEEDBACK
+        in walking.py.
+        """
+        self.x = np.asarray(x, dtype=float).copy()
+
     def comState(self):
         # return the center of mass state
         # that is position \in R3, velocity \in R3, acceleration \in R3

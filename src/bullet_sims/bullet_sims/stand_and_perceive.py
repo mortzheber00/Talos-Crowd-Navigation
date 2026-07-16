@@ -38,7 +38,8 @@ def _setup_simulator():
     conf.no_sim_per_step = int(round(conf.step_dur / conf.dt))
 
     return PybulletWrapper(sim_rate=frequency, num_solver_iterations=50,
-                           num_sub_steps=8, render=True)
+                           num_sub_steps=8, render=True,
+                           collision_boxes=conf.sole_collision_boxes)
 
 
 def main():

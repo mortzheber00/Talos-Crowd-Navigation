@@ -325,11 +325,30 @@ class Robot(Body):
             q = np.concatenate((x_b_w, Q_b_w, q))
 
             # Note: the floating base velocity is expressed in the base frame, not in world!
+            # Q_b_w is the base orientation IN WORLD, so R_b_w maps base -> world.
+            # baseWorldVelocity() is already in world, so going world -> base needs
+            # the INVERSE: v_base = R_b_w.T @ v_world.
+            #
+            # This used to apply R_b_w (not its transpose), rotating the world
+            # velocity by the base yaw AGAIN instead of undoing it -- the state
+            # handed to pinocchio was wrong by a rotation of TWICE the base yaw, on
+            # both the linear and angular parts. It is exactly inert at yaw = 0
+            # (R = I), so straight walking was correct and every turn corrupted
+            # TSID's state estimate progressively. That is a STATE ESTIMATION error,
+            # so no gain could touch it: kp_foot 15x, w_foot 100x, kp_com and w_base
+            # all measured as no-ops, because the controller was tracking correctly
+            # against a wrong idea of where the robot was going. It corrupts the CoM
+            # velocity task, the DCM estimate and every task Jacobian's dv at once.
+            # Symptom in walking_results row 2: pinocchio's CoM velocity differed
+            # from the simulator's by a ROTATION (same magnitude, wrong direction)
+            # while CoM position -- computed independently, not through this line --
+            # agreed exactly.
             R_b_w = np.array(mjw.getMatrixFromQuaternion(Q_b_w)).reshape((3, 3))
 
             # floating base qP = [xP, omega, qP_0, ..., qP_n]
             XP_com_w = self.baseWorldVelocity()
-            v = np.concatenate((R_b_w.dot(XP_com_w[:3]), R_b_w.dot(XP_com_w[3:]), v))
+            v = np.concatenate((R_b_w.T.dot(XP_com_w[:3]),
+                                R_b_w.T.dot(XP_com_w[3:]), v))
         
         # save internally in pinocchio format
         self._q[self._q_map_pb_pin] = q

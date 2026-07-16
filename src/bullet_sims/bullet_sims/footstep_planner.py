@@ -74,47 +74,104 @@ class FootStepPlanner:
     def __init__(self, conf):
         self.conf = conf
         self.steps = []
+
+    def _step_z(self, ground_z=None):
+        """Sole-frame z to place footsteps at.
+
+        This MUST be pinned to the ground, not read off the measured support
+        foot. Both planners used to do ``z0 = T_0_w.translation[2]``, and since
+        _plan_from re-anchors from the measured support foot every step, that
+        made the step height a unity-gain integrator with no reference to the
+        floor at all:
+
+            z_target(n+1) = z_measured(n)
+
+        so any systematic landing bias compounded instead of being corrected.
+        Measured at ~2 mm/step: CoM z rose 0.854 -> 0.892 over 15 s of straight
+        walking, and _report_drift could not see it because its CoM norm is
+        xy-only. The contact task (w=1e5) outweighs the CoM task (w=1e1) by 1e4,
+        so the CoM task can never pull the robot back down -- the feet decide the
+        height, which is why no kp_com/w_com value fixed this.
+        """
+        if ground_z is not None:
+            return float(ground_z)
+        return float(getattr(self.conf, 'ground_z', 0.0))
         
-    def planLine(self, T_0_w, side, no_steps):
-        """plan a sequence of steps in a strait line
+    def planLine(self, T_0_w, side, no_steps, ground_z=None):
+        """plan a sequence of steps in a straight line along T_0_w's heading
 
         Args:
             T_0_w (pin.SE3): The inital starting position of the plan
             side (Side): The intial foot for starting the plan
             no_steps (_type_): The number of steps to take
+            ground_z (float): sole-frame z of a foot flat on the floor. Defaults
+                to conf.ground_z (0.0). See _step_z for why this must NOT come
+                from the measured support foot.
 
         Returns:
             list: sequence of steps
         """
         
-        # the displacement between steps in x and y direction
-        dx = self.conf.step_size_x
-        dy = 2*self.conf.step_size_y
+        # Structured like planCircle with zero curvature: a centre path advances
+        # step_size_x per step along the INITIAL heading, and each foot is placed
+        # step_size_y to its OWN side of that path.
+        #
+        # The previous version offset each step by dy * (i % 2), which is never
+        # negative -- the feet never straddled the path. On the one-shot plan that
+        # merely sat the whole gait 0.5*dy off to one side, but _plan_from
+        # re-anchors from the measured support foot EVERY step and always takes
+        # plan[1], where i = 1 -> +dy. So every step shoved the swing foot a
+        # further +2*step_size_y in world +y, and the robot walked a permanent
+        # atan2(2*sy, sx) = 37.5 deg diagonal. (It looked like goal-seeking only
+        # because ROBOT_GOAL=(4,3) happens to sit at 37.5 deg.) The offset was
+        # also added in WORLD axes, never rotated by T_0_w.rotation, so the "line"
+        # ignored the robot's heading.
+        step_x = self.conf.step_size_x          # advance of the centre per step
+        sy = self.conf.step_size_y              # lateral offset of each foot
         
         # the footprint of the robot
         lfxp, lfxn = self.conf.lfxp, self.conf.lfxn
         lfyp, lfyn = self.conf.lfyp, self.conf.lfyn
         
-        steps=[]
+        # Heading + position from the initial pose. The step orientation is the
+        # YAW-ONLY rotation: a footstep target is flat on the ground, whereas
+        # T_0_w is the measured support foot, so taking its rotation whole would
+        # propagate that foot's roll/pitch into every planned step.
+        yaw0 = np.arctan2(T_0_w.rotation[1, 0], T_0_w.rotation[0, 0])
+        p0 = T_0_w.translation[:2]
+        z0 = self._step_z(ground_z)
+        c, s = np.cos(yaw0), np.sin(yaw0)
+        forward = np.array([c, s])
+        left = np.array([-s, c])
+        R0 = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+        # place the centre path so that step 0 lands on the support foot
+        lateral0 = sy if side == Side.LEFT else -sy
+        centre = p0 - lateral0 * left
+
+        steps = []
+        cur_side = side
 
         for i in range(no_steps):
-            # Compute the pose of the current step based on the initial pose and step size
-            step_pose = pin.SE3(T_0_w.rotation, T_0_w.translation + np.array([dx * i, dy * (i % 2), 0]))
+            # advance the centre along the heading, then offset to this foot's side
+            lateral = sy if cur_side == Side.LEFT else -sy
+            foot_xy = centre + i * step_x * forward + lateral * left
+            step_pose = pin.SE3(R0, np.array([foot_xy[0], foot_xy[1], z0]))
             # Determine the footprint based on the side of the step
-            if side == Side.LEFT:
+            if cur_side == Side.LEFT:
                 footprint = np.array([[lfxp, lfxn], [lfyp, lfyn], [0, 0]])
             else:
                 footprint = np.array([[lfxn, lfxp], [lfyn, lfyp], [0, 0]])
             # Create a FootStep object and add it to the steps list
-            steps.append(FootStep(step_pose, footprint, side))
+            steps.append(FootStep(step_pose, footprint, cur_side))
             # Alternate sides for the next step
-            side = other_foot_id(side)
+            cur_side = other_foot_id(cur_side)
                                 
         self.steps = steps
         return steps
 
     def planCircle(self, T_0_w, side, no_steps, radius=1.5, clockwise=False,
-                   face_path=False):
+                   face_path=False, ground_z=None):
         """plan a sequence of steps along a circular arc.
 
         The robot's centre path follows a circle of the given radius; each foot is
@@ -140,6 +197,9 @@ class FootStepPlanner:
             radius (float): radius of the centre path [m]. Larger = gentler curve.
             clockwise (bool): curve direction. False = left/CCW, True = right/CW.
             face_path (bool): rotate the feet/body to face the path (see above).
+            ground_z (float): sole-frame z of a foot flat on the floor. Defaults
+                to conf.ground_z (0.0). See _step_z for why this must NOT come
+                from the measured support foot.
 
         Returns:
             list: sequence of FootStep.
@@ -153,10 +213,11 @@ class FootStepPlanner:
         turn = -1.0 if clockwise else 1.0
         dpsi = turn * step_x / radius
 
-        # starting heading + position taken from the initial pose
+        # starting heading + position taken from the initial pose; the height is
+        # pinned to the ground (see _step_z), NOT read off the support foot
         yaw0 = np.arctan2(T_0_w.rotation[1, 0], T_0_w.rotation[0, 0])
         p0 = T_0_w.translation[:2]
-        z0 = T_0_w.translation[2]
+        z0 = self._step_z(ground_z)
 
         def left_dir(psi):
             # unit vector 90 deg to the left of heading psi

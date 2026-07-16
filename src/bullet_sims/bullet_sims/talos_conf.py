@@ -49,6 +49,37 @@ zmp_margin = 0.02                       # [m] safety margin shrinking the MPC's
                                         # = the foot rolls about that edge)
 
 lz = 0.                                 # foot sole height with respect to ankle joint
+
+# Foot collision boxes handed to MujocoWrapper(collision_boxes=...). The URDF's
+# convex-hull foot is a bad sole: dropped flat it makes 3 clustered contacts
+# spanning y[-0.049,-0.006] instead of the full +/-lfy, and its lowest vertex is
+# 16.5 mm below the sole frame TSID uses as the contact plane. A box gives the
+# four corner contacts the lfxp/lfxn/lfyp/lfyn support polygon (the one lip_mpc
+# constrains the ZMP inside) actually assumes.
+sole_z = -0.107                         # sole frame z in leg_*_6_link, from the
+                                        # URDF's leg_*_sole_fix_joint origin
+sole_box_half_h = 0.005                 # box half-height; bottom face lands on sole_z
+sole_collision_boxes = {
+    f"leg_{side}_6_link": {
+        "size": [(lfxp + lfxn) / 2, (lfyp + lfyn) / 2, sole_box_half_h],
+        "pos": [(lfxp - lfxn) / 2, (lfyp - lfyn) / 2, sole_z + sole_box_half_h],
+    }
+    for side in ("left", "right")
+}
+
+# Height of the ground plane the footstep planners place steps on. The planners
+# USED to take each step's z from the MEASURED support foot, which made the step
+# height a pure integrator (z_target(n+1) = z_measured(n)) with no reference to
+# the floor at all: any systematic landing bias compounded, and the robot walked
+# up an invisible staircase (~2 mm/step -> CoM z 0.854 -> 0.892 over 15 s of
+# straight walking, invisible to _report_drift because its CoM norm is xy-only).
+#
+# COUPLED TO sole_collision_boxes ABOVE: 0.0 is correct only because the box sole
+# puts the contact plane exactly on the sole frame. With the URDF's convex hull
+# (lowest vertex 16.5 mm BELOW the sole frame) a grounded foot measured +0.0165,
+# and 0.0 here would drive the feet into the floor. Change one, re-check the other.
+ground_z = 0.0                          # [m] sole-frame z of a foot flat on the floor
+
 f_mu = 0.3                              # friction coefficient
 f_fMin = 5.0                            # minimum normal force
 f_fMax = 1e6                            # maximum normal force
@@ -77,6 +108,12 @@ w_foot = 5e0            # weight of the swing-foot motion task (walking needs re
 w_hand = 1e-1           # weight of the hand motion task
 w_torso = 4             # weight torso orientation task (raised from 1 so the trunk
                         # actively steers the heading through turns instead of lagging)
+torso_ori_only = True   # True: mask the torso task to ORIENTATION only (3 rows).
+                        # False: legacy 6D task -- the position rows are still in
+                        # the QP with zero gains, which commands ZERO LINEAR
+                        # ACCELERATION of the torso at weight w_torso and fights
+                        # the CoM task. False only to A/B against old results;
+                        # w_torso/kp_torso were tuned under the legacy behaviour.
 w_base = 0              # weight of the base (pelvis) yaw task. 0 = DISABLED
                         # (A/B sim 2026-07-15: enabling (w=1, kp=12) made the 45deg
                         # turn fall at t=5.5s vs t=17.7s without). If re-enabled,

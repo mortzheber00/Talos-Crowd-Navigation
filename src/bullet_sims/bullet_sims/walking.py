@@ -621,6 +621,15 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         if t - t_publish > 1. / 30.:
             t_publish = t
             robot.publish()
+            # depth image + CameraInfo (front RGB-D): depth_image_proc's
+            # point_cloud_xyz turns these into /camera/depth/points for RViz
+            # (ros2 launch bullet_sims depth_image_proc.launch.py)
+            robot.publish_depth_image()
+            if PEDESTRIAN_SENSOR_DATA:
+                # obstacle-estimate overlay (cyan) + ground-truth ghosts (grey)
+                robot.publish_obstacle_markers(
+                    {p.name: dict(x=p.position[0], y=p.position[1], r=p.radius)
+                     for p in crowd.peds})
 
         # store for the post-run plots
         if i >= 0:

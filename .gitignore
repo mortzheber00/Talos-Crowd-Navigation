@@ -10,6 +10,7 @@ __pycache__/
 # Lokale VS Code Einstellungen (optional, je nach Vorliebe)
 .vscode/cmake-variants.json
 .vscode/ipch/
+.claude/
 
 # Große Logdaten oder Bag-Files (wichtig für Robotik!)
 *.bag

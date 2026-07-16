@@ -154,6 +154,7 @@ class Talos:
         self._obs_ema_alpha = 0.3        # velocity EMA smoothing factor
         self._obs_last_t = None          # sim time of the previous update
         self.MIN_OBSTACLE_PIXELS = 30    # below this a mask counts as occluded
+        self.OBSTACLE_STALE_TIMEOUT = 1.0  # [s] drop tracks unseen longer than this
 
         self._joint_pub = self._node.create_publisher(JointState, 'joint_states', 10)
         self._odom_pub = self._node.create_publisher(Odometry, 'odom', 10)
@@ -490,9 +491,17 @@ class Talos:
             prev = self._obstacles.get(name)
 
             if int(mask.sum()) < self.MIN_OBSTACLE_PIXELS:
-                # occluded or out of view: hold the last estimate, flag it
+                # occluded or out of view: hold the last estimate briefly, then
+                # drop the track -- a frozen estimate fed to ORCA forever acts
+                # as a phantom obstacle blocking the robot's path. While held,
+                # treat it as static: extrapolating the last velocity places
+                # the ORCA half-plane where the agent no longer is.
                 if prev is not None:
-                    prev['stale'] = True
+                    if t_now - prev['t'] > self.OBSTACLE_STALE_TIMEOUT:
+                        del self._obstacles[name]
+                    else:
+                        prev['stale'] = True
+                        prev['vx'] = prev['vy'] = 0.0
                 continue
 
             v_pix, u_pix = np.nonzero(mask)          # rows = v, cols = u

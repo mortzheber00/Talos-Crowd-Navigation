@@ -51,20 +51,20 @@ CIRCLE_FACE_PATH = False
 # v_cmd (from ORCA) now DRIVES the reactive footstep planner; green arrow = v_cmd.
 ROBOT_GOAL = (4.0, 0.0)    # world (x, y) navigation goal
 ARROW_SCALE = 3.0          # visual stretch so the slow v_cmd arrow is visible
-WALK_DURATION = 30.0       # [s] max walk time (reactive walking has no fixed step count)
+WALK_DURATION = 45.0       # [s] max walk time (reactive walking has no fixed step count)
 REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MODE plan
 
 # ---- runtime parameters (defaults; override at launch via ROS 2 params, e.g.
 #   ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=true )
 SCENARIO = "random"              # crowd scenario: head_on | crossing | circle | corridor | random
-PEDESTRIAN_SENSOR_DATA = False   # True: depth-camera perception; False: ground-truth states
+PEDESTRIAN_SENSOR_DATA = True   # True: depth-camera perception; False: ground-truth states
 # WALK selects what drives the reactive gait:
 #   "goal"   - ORCA velocity toward ROBOT_GOAL, avoiding pedestrians (default)
 #   "circle" - constant twist (CIRCLE_SPEED forward + omega = speed/radius):
 #              the robot walks a circular arc with the feet tangent to it,
 #              ignoring ORCA. E.g.:
 #   ros2 run bullet_sims walking --ros-args -p walk:=circle -p circle_radius:=1.5
-WALK = "circle"
+WALK = "goal"
 CIRCLE_SPEED = 0.3               # [m/s] forward speed on the circle
 # USE_HEADING toggles the whole heading integration (runtime: -p use_heading:=false):
 #   True  - the robot turns into its direction of travel: HeadingController
@@ -73,7 +73,7 @@ CIRCLE_SPEED = 0.3               # [m/s] forward speed on the circle
 #   False - omnidirectional gait: omega_z = 0 everywhere, the feet keep their
 #           spawn yaw and the robot side-steps along curved paths (the old,
 #           pre-heading behavior; also the fallback if turning misbehaves).
-USE_HEADING = True
+USE_HEADING = False
 
 # reactive walking: per-MPC-tick gain pulling the open-loop LIP interpolator
 # state toward the measured CoM. Must exceed 1 - exp(-omega*dt_mpc) ~ 0.29

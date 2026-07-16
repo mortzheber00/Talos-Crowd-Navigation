@@ -24,6 +24,7 @@ from bullet_sims.foot_trajectory import SwingFootTrajectory
 from bullet_sims.talos import Talos
 from bullet_sims.lip_mpc import LIPMPC, LIPInterpolator, generate_zmp_reference, generate_yaw_reference
 from bullet_sims.reactive_footstep_planner import ReactiveFootStepPlanner
+from bullet_sims.floor_ambience import setup_floor_ambience
 
 # crowd
 from orca_nav.robot_orca import RobotORCA
@@ -37,7 +38,7 @@ from orca_nav.pedestrian import PedestrianSimulator
 
 
 # footstep path for the walking demo: "line" (straight) or "circle" (curved)
-WALK_MODE = "circle"
+WALK_MODE = "line"
 CIRCLE_RADIUS = 1.5     # [m] radius of the centre path when WALK_MODE == "circle"
 CIRCLE_CLOCKWISE = False   # False = curve left/CCW, True = curve right/CW
 # False = omnidirectional (fixed facing, side-steps along the curve) -> robust: reuses
@@ -47,7 +48,7 @@ CIRCLE_FACE_PATH = False
 
 # robot navigation: goal it heads toward, and the arrow display scale.
 # v_cmd (from ORCA) now DRIVES the reactive footstep planner; green arrow = v_cmd.
-ROBOT_GOAL = (4.0, 3.0)    # world (x, y) navigation goal
+ROBOT_GOAL = (4.0, 0.0)    # world (x, y) navigation goal
 ARROW_SCALE = 3.0          # visual stretch so the slow v_cmd arrow is visible
 WALK_DURATION = 30.0       # [s] max walk time (reactive walking has no fixed step count)
 REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MODE plan
@@ -68,7 +69,7 @@ TOUCHDOWN_FZ = 75.0        # [N]
 # ---- runtime parameters (defaults; override at launch via ROS 2 params, e.g.
 #   ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=true )
 SCENARIO = "random"              # crowd scenario: head_on | crossing | circle | corridor | random
-PEDESTRIAN_SENSOR_DATA = False   # True: depth-camera perception; False: ground-truth states
+PEDESTRIAN_SENSOR_DATA = False    # True: depth-camera perception; False: ground-truth states
 
 
 ################################################################################
@@ -664,6 +665,11 @@ def _read_runtime_params():
 def main():
     # NOTE: ros2 run skips the __main__ block, so all setup happens here.
     simulator = _setup_simulator()
+
+    # apply beautiful tiled floor and lighting
+    setup_floor_ambience(simulator._spec)
+    simulator._dirty = True
+    simulator._ensure_compiled()
 
     # runtime parameters (scenario, sensor vs ground truth) -> module globals
     _read_runtime_params()

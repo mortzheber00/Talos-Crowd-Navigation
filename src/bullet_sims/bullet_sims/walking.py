@@ -834,8 +834,8 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     torso_yaw_rate = 0.0                        # raw d(torso_yaw)/dt (diagnostic)
 
     # robot ORCA velocity generator: v_cmd toward the goal, avoiding pedestrians
-    robot_ctrl = RobotORCA(ROBOT_GOAL, radius=0.35, max_speed=0.4,
-                           desired_speed=0.25, safety_margin=0.2)
+    robot_ctrl = RobotORCA(ROBOT_GOAL, radius=0.35, max_speed=1.5,
+                           desired_speed=1.2, safety_margin=0.2)
 
     # reactive footstep planner: each step, places the next footstep in the
     # direction of v_cmd (omnidirectional / fixed facing) and feeds the MPC.

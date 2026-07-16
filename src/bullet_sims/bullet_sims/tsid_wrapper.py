@@ -322,9 +322,20 @@ class TSIDWrapper:
         '''
         self.torsoTask = tsid.TaskSE3Equality(
             "task-torso", self.robot, self.conf.torso_frame_name)
-        self.torsoTask.setKp(self.conf.kp_torso * np.array([0, 0, 0, 1, 1, 1]))
-        self.torsoTask.setKd(2.0 * np.sqrt(self.conf.kp_torso)
-                             * np.array([0, 0, 0, 1, 1, 1]))
+        torso_mask = np.array([0., 0., 0., 1., 1., 1.])
+        self.torsoTask.setKp(self.conf.kp_torso * torso_mask)
+        self.torsoTask.setKd(2.0 * np.sqrt(self.conf.kp_torso) * torso_mask)
+        # Zeroing Kp/Kd on the position rows does NOT remove them: without an
+        # explicit setMask the task stays 6D (verified: dim 6 vs 3), and those
+        # rows command a_des = a_ref + Kp*e + Kd*edot = 0, i.e. ZERO LINEAR
+        # ACCELERATION of the torso frame in the world at weight w_torso --
+        # fighting the CoM task on every step. Masking drops them to a pure
+        # orientation task. conf.torso_ori_only=False recovers the legacy 6D
+        # behaviour for A/B (NOTE kp_torso/w_torso were tuned WITH the spurious
+        # rows absorbing part of the weight, so masking makes orientation
+        # tracking effectively stiffer -> re-baseline after flipping this).
+        if getattr(self.conf, 'torso_ori_only', True):
+            self.torsoTask.setMask(torso_mask)
         formulation.addMotionTask(self.torsoTask, self.conf.w_torso, 1, 0.0)
 
         # torso reference is current
@@ -561,11 +572,16 @@ class TSIDWrapper:
         self.baseTask.setReference(self.base_ref)
 
     def baseState(self, dv=None):
+        """Pelvis pose/velocity (and acceleration when ``dv`` is given).
+
+        The acceleration is only available while the base task exists
+        (conf.w_base > 0); it is None otherwise."""
         data = self.formulation.data()
         T_frame_w = self.robot.framePosition(data, self.base_id)
         v_frame_w = self.robot.frameVelocity(data, self.base_id)
         if dv is not None:
-            a_frame_w = self.torsoTask.getAcceleration(dv)
+            a_frame_w = (self.baseTask.getAcceleration(dv)
+                         if self.baseTask is not None else None)
             return T_frame_w, v_frame_w, a_frame_w
         return T_frame_w, v_frame_w
 

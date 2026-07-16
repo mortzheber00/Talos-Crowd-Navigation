@@ -163,9 +163,22 @@ class MujocoWrapper:
                  sim_rate=1000,
                  gravity=np.array([0, 0, -9.81]),
                  num_solver_iterations=None,
-                 num_sub_steps=None):
+                 num_sub_steps=None,
+                 collision_boxes=None):
+        """
+        Args:
+            collision_boxes (dict): optional ``{body_name: {"size": [hx, hy, hz],
+                "pos": [x, y, z]}}``. For each named body in a URDF loaded via
+                createBodyFromUrdf, retires that body's collision geoms and
+                replaces them with a single box. Meant for feet: a URDF's convex
+                hull is a poor sole (see createBodyFromUrdf for the measurements),
+                and a box gives the four corner contacts the ZMP/CoP model of a
+                flat foot assumes. None (default) leaves URDF collision untouched,
+                which is what non-robot bodies (pedestrians) want.
+        """
 
         self._render = bool(render)
+        self._collision_boxes = dict(collision_boxes or {})
         self._sim_rate = sim_rate
         self._sim_time_step = 1.0 / self._sim_rate
         # Like PyBullet's numSubSteps: the controller sees a 1/sim_rate control
@@ -182,6 +195,13 @@ class MujocoWrapper:
         self._time_warp = 1.0
         # High tangential friction so the feet do not slip under the rigid-contact
         # forces a TSID-style inverse-dynamics controller assumes.
+        # NOTE: only friction[0] (sliding) is live -- every geom here compiles at
+        # the default condim=3, so the torsional/rolling coefficients are never
+        # read. Yaw resistance comes from the lever arms of the sole box's corner
+        # contacts (see collision_boxes), which is the correct mechanism for a
+        # flat foot; condim=4 torsional friction is a lumped fudge for POINT
+        # contacts. Do not raise condim to 6 without zeroing friction[2] -- rolling
+        # friction would fake up ankle torque the controller has not commanded.
         self._floor_friction = [2.0, 0.05, 0.001]
 
         # model building state
@@ -490,6 +510,35 @@ class MujocoWrapper:
         xml = re.sub(r"(<robot[^>]*>)", r"\1\n  " + inject, xml, count=1)
         return mujoco.MjSpec.from_string(xml)
 
+    def _apply_collision_boxes(self, robot_spec):
+        """Replace the collision geoms of each body named in ``collision_boxes``
+        with a single box geom of the configured size/pos. Bodies absent from the
+        URDF are skipped, so one config can serve several robot variants."""
+        for body_name, spec in self._collision_boxes.items():
+            try:
+                body = robot_spec.body(body_name)
+            except (KeyError, ValueError):
+                continue
+            if body is None:
+                continue
+            for g in body.geoms:
+                if g.contype != 0 or g.conaffinity != 0:
+                    g.contype = 0          # retire the hull; keep it for viewing
+                    g.conaffinity = 0
+            box = body.add_geom(
+                name=f"{body_name}_collision_box",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=list(spec["size"]),
+                pos=list(spec["pos"]),
+                rgba=[0.9, 0.3, 0.2, 0.6])
+            box.contype = 2                # same collision groups as the hulls
+            box.conaffinity = 1
+            box.group = 3                  # hidden by default; press "3" to show
+            # The URDF supplies each link's <inertial>, so the compiler takes mass
+            # from that and ignores geom density -- but pin it to 0 anyway so the
+            # box can never contribute mass if that compiler default ever changes.
+            box.density = 0.0
+
     def createBodyFromUrdf(self, filename, position, orientation=[0., 0., 0., 1.],
                            use_fixed_base=True, flags=None, *args, **kwargs):
         """Load a URDF, add a floating-base joint (if requested), position/torque
@@ -520,6 +569,18 @@ class MujocoWrapper:
                 # Visual meshes stay in group 0; press "3" in the viewer to show
                 # the hulls again for debugging.
                 g.group = 3
+
+        # Swap the configured bodies' collision hulls for boxes (feet -- see the
+        # collision_boxes arg). Measured on the Talos foot hull, dropped flat on
+        # the floor in isolation: the hull yields 3 contact points clustered in a
+        # lopsided triangle spanning y[-0.049,-0.006], nowhere near the sole's
+        # +/-0.065, and its lowest vertex sits 16.5 mm BELOW the URDF sole frame
+        # that TSID/pinocchio treat as the contact plane. So the realizable CoP
+        # polygon was both far smaller than, and offset from, the support polygon
+        # lip_mpc constrains the ZMP inside -- the MPC routinely commanded a CoP
+        # physics could not produce. The box restores all four sole corners and
+        # puts the contact plane exactly on the sole frame.
+        self._apply_collision_boxes(robot_spec)
 
         root = robot_spec.worldbody.bodies[0]
         root.pos = position

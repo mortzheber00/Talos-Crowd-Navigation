@@ -56,7 +56,7 @@ class ReactiveFootStepPlanner:
                  samples_per_step, samples_per_horizon,
                  max_step_len=None, goal_tol=0.3, n_lookahead=None,
                  max_dyaw=None, turn_deadband=0.05, turn_gain=0.3,
-                 min_lateral_sep=None):
+                 min_lateral_sep=None, alternate_yaw=False):
         """
         Args:
             conf: talos_conf module (uses step_size_x/y, step_dur, foot half-sizes).
@@ -80,6 +80,12 @@ class ReactiveFootStepPlanner:
             min_lateral_sep (float): minimum lateral separation [m] the swing
                 foot keeps to its own side of the previous foot (anti-crossing).
                 Defaults to the foot width + 2 cm.
+            alternate_yaw (bool): if True, only the INSIDE foot of the turn
+                advances the heading; the outside foot re-places at the heading
+                the inside foot already reached (dcm_walker's anti-crossing
+                rule). Yaw then advances once per STEP PAIR, so the two feet are
+                never more than one ``dpsi`` apart in yaw. False = every step
+                advances the heading (baseline).
         """
         self.conf = conf
         self.goal = np.asarray(goal, dtype=float)[:2].copy()
@@ -92,6 +98,7 @@ class ReactiveFootStepPlanner:
         self.max_dyaw = np.deg2rad(6.0) if max_dyaw is None else float(max_dyaw)
         self.turn_deadband = float(turn_deadband)
         self.turn_gain = float(np.clip(turn_gain, 0.0, 1.0))
+        self.alternate_yaw = bool(alternate_yaw)
         foot_width = conf.lfyp + conf.lfyn
         self.min_lateral_sep = (foot_width + 0.02) if min_lateral_sep is None \
             else float(min_lateral_sep)
@@ -129,7 +136,7 @@ class ReactiveFootStepPlanner:
         c, s = np.cos(psi), np.sin(psi)
         return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
-    def _advance(self, psi, v_cmd):
+    def _advance(self, psi, v_cmd, swing_side=None):
         """One steering update: translate along the FULL command (holonomic)
         and turn the facing a bounded fraction toward it.
 
@@ -146,6 +153,12 @@ class ReactiveFootStepPlanner:
         psi_des = np.arctan2(v[1], v[0])
         dpsi = np.clip(self.turn_gain * _wrap(psi_des - psi),
                        -self.max_dyaw, self.max_dyaw)
+        if self.alternate_yaw and swing_side is not None:
+            # only the inside foot of the turn carries the heading forward; the
+            # outside foot merely catches up to the heading already reached.
+            outside = Side.RIGHT if dpsi > 0 else Side.LEFT
+            if swing_side == outside:
+                dpsi = 0.0
         psi_new = psi + dpsi
         disp = v * self.step_dur
         norm = np.hypot(*disp)
@@ -196,7 +209,7 @@ class ReactiveFootStepPlanner:
         prev_foot_xy = support_xy
         first_psi = None
         for _ in range(self.n_lookahead):
-            psi, disp = self._advance(psi, vc)
+            psi, disp = self._advance(psi, vc, swing_side)
             centre = centre + disp
             centre = self._guard_cross(centre, psi, swing_side, prev_foot_xy)
             fs = self._place_foot(centre, psi, swing_side)

@@ -51,7 +51,7 @@ CIRCLE_FACE_PATH = False
 # v_cmd (from ORCA) now DRIVES the reactive footstep planner; green arrow = v_cmd.
 ROBOT_GOAL = (4.0, 0.0)    # world (x, y) navigation goal
 ARROW_SCALE = 3.0          # visual stretch so the slow v_cmd arrow is visible
-WALK_DURATION = 45.0       # [s] max walk time (reactive walking has no fixed step count)
+WALK_DURATION = 35.0       # [s] max walk time (reactive walking has no fixed step count)
 REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MODE plan
 
 # ---- runtime parameters (defaults; override at launch via ROS 2 params, e.g.
@@ -73,7 +73,7 @@ CIRCLE_SPEED = 0.3               # [m/s] forward speed on the circle
 #   False - omnidirectional gait: omega_z = 0 everywhere, the feet keep their
 #           spawn yaw and the robot side-steps along curved paths (the old,
 #           pre-heading behavior; also the fallback if turning misbehaves).
-USE_HEADING = False
+USE_HEADING = True
 
 # reactive walking: per-MPC-tick gain pulling the open-loop LIP interpolator
 # state toward the measured CoM. Must exceed 1 - exp(-omega*dt_mpc) ~ 0.29
@@ -947,6 +947,15 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         if t - t_publish > 1. / 30.:
             t_publish = t
             robot.publish()
+            # depth image + CameraInfo (front RGB-D): depth_image_proc's
+            # point_cloud_xyz turns these into /camera/depth/points for RViz
+            # (ros2 launch bullet_sims depth_image_proc.launch.py)
+            robot.publish_depth_image()
+            if PEDESTRIAN_SENSOR_DATA:
+                # obstacle-estimate overlay (cyan) + ground-truth ghosts (grey)
+                robot.publish_obstacle_markers(
+                    {p.name: dict(x=p.position[0], y=p.position[1], r=p.radius)
+                     for p in crowd.peds})
 
         # store for the post-run plots
         if i >= 0:

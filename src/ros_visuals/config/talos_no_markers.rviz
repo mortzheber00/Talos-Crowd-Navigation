@@ -68,6 +68,26 @@ Visualization Manager:
         Point Shape: Sphere
         Point Size: 0.05
         Unselectable Transparency: 0.5
+    - Class: rviz_default_plugins/MarkerArray
+      Name: ObstacleMarkers
+      Enabled: true
+      Namespaces: {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /obstacle_markers
+    - Class: rviz_default_plugins/MarkerArray
+      Name: ZMP_DCM
+      Enabled: true
+      Namespaces: {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /zmp
   Enabled: true
   Name: root
   Tools:

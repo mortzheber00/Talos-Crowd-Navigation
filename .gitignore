@@ -16,6 +16,7 @@ __pycache__/
 *.bag
 *.mcap
 *.log
+MUJOCO_LOG.TXT
 
 # Devcontainer (may be OS specific)
 .devcontainer/

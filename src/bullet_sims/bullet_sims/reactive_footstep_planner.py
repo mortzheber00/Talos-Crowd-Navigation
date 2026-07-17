@@ -1,32 +1,18 @@
-"""reactive_footstep_planner.py
-Online, one-step-at-a-time footstep planning that STEERS toward a commanded velocity.
+"""Online, one-step-at-a-time footstep planning that steers toward a commanded
+velocity ``v_cmd`` (from the robot's ORCA layer), in place of a fixed plan.
 
-Instead of a fixed footstep plan (planLine / planCircle), this generates the next
-footstep every step so the robot TURNS to face the current velocity command
-``v_cmd`` (coming from the robot's ORCA layer) and then walks forward along it — the
-way a person turns to face where they are going. Each step:
+A blended side-step + turn gait: the pelvis path point translates along the full
+``v_cmd``, so lateral avoidance reacts within one step, while the facing turns toward
+the command by only a ``turn_gain`` fraction of the heading error per step
+(rate-limited by ``max_dyaw``, with a deadband so noise or a zero command don't spin
+the robot). ``turn_gain = 0`` gives a pure fixed-facing side-step, ``1`` turns as
+fast as the rate limit allows. Since the displacement is not tied to the facing,
+``_guard_cross`` keeps the swing foot to its own side of the previous foot.
 
-  * rotate the body heading ``psi`` a bounded amount toward the direction of
-    ``v_cmd`` (rate-limited, with a deadband so noise / a zero command don't spin
-    the robot);
-  * step the swing foot forward along the new heading, offset to its own side by a
-    fixed step width. The forward length shrinks with heading misalignment, so a
-    sharply off-axis command turns (nearly) in place until the body faces it.
-
-This is a **blended side-step + turn** gait: the pelvis path point always
-translates along the FULL ``v_cmd`` (holonomic, like the old fixed-facing
-side-step — so lateral avoidance reacts within one step), while the facing turns
-toward the command by only a ``turn_gain`` fraction of the heading error per step
-(rate-limited by ``max_dyaw``). ``turn_gain = 0`` recovers the pure fixed-facing
-side-step exactly (the most stable mode); ``turn_gain = 1`` turns as fast as the
-rate limit allows. Because the displacement is no longer tied to the facing, an
-explicit anti-crossing guard (``_guard_cross``) keeps the swing foot a minimum
-lateral separation to its own side of the previous foot.
-
-The planner keeps a short lookahead buffer (a few steps ahead, all extrapolated
-from the current ``v_cmd``) so the LIP-MPC can see the ~2 steps of ZMP/yaw reference
-it needs. The buffer is regenerated from the current support foot each step, so the
-committed next step always reflects the latest ``v_cmd`` (≈ one-step reactivity).
+The planner keeps a short lookahead buffer, extrapolated from the current ``v_cmd``,
+so the LIP-MPC sees the ~2 steps of ZMP/yaw reference it needs. Regenerating it from
+the current support foot each step keeps the committed next step on the latest
+``v_cmd``.
 
 Everything is 2D in the world ground plane (x, y), SI units.
 """
@@ -76,16 +62,14 @@ class ReactiveFootStepPlanner:
                 held (no turning) and the robot steps in place.
             turn_gain (float in [0, 1]): fraction of the heading error the facing
                 turns per step (before the max_dyaw cap). 0 -> fixed-facing
-                side-step (most stable), 1 -> full-rate turning.
+                side-step, 1 -> full-rate turning.
             min_lateral_sep (float): minimum lateral separation [m] the swing
                 foot keeps to its own side of the previous foot (anti-crossing).
                 Defaults to the foot width + 2 cm.
-            alternate_yaw (bool): if True, only the INSIDE foot of the turn
-                advances the heading; the outside foot re-places at the heading
-                the inside foot already reached (dcm_walker's anti-crossing
-                rule). Yaw then advances once per STEP PAIR, so the two feet are
-                never more than one ``dpsi`` apart in yaw. False = every step
-                advances the heading (baseline).
+            alternate_yaw (bool): if True, only the inside foot of the turn advances
+                the heading and the outside foot catches up to it, so yaw advances
+                once per step pair and the feet are never more than one ``dpsi``
+                apart. If False, every step advances the heading.
         """
         self.conf = conf
         self.goal = np.asarray(goal, dtype=float)[:2].copy()
@@ -137,13 +121,13 @@ class ReactiveFootStepPlanner:
         return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
     def _advance(self, psi, v_cmd, swing_side=None):
-        """One steering update: translate along the FULL command (holonomic)
-        and turn the facing a bounded fraction toward it.
+        """One steering update: translate along the full command (holonomic) and turn
+        the facing a bounded fraction toward it.
 
-        Returns (psi_new, disp) where ``disp`` is the 2D pelvis displacement for
-        the step. Unlike the earlier unicycle version, the displacement is NOT
-        projected onto the facing — an off-axis command side-steps immediately
-        (one-step reactivity) while the body comes around gradually.
+        Returns (psi_new, disp) where ``disp`` is the 2D pelvis displacement for the
+        step. The displacement is deliberately not projected onto the facing, so an
+        off-axis command side-steps immediately while the body comes around
+        gradually.
         """
         v = np.asarray(v_cmd, dtype=float)[:2]
         speed = np.hypot(*v)
@@ -167,12 +151,11 @@ class ReactiveFootStepPlanner:
         return psi_new, disp
 
     def _guard_cross(self, centre, psi, swing_side, prev_foot_xy):
-        """Anti-crossing guard: keep the swing foot at least ``min_lateral_sep``
-        to its OWN side of the previous foot, measured along the facing's left
-        axis. Shifts the pelvis centre laterally when violated. Needed because
-        the displacement now follows v_cmd rather than the facing, so a hard
-        lateral command could otherwise land the swing foot across the stance
-        foot."""
+        """Anti-crossing guard: keep the swing foot at least ``min_lateral_sep`` to
+        its own side of the previous foot, measured along the facing's left axis,
+        shifting the pelvis centre laterally when violated. The displacement follows
+        v_cmd rather than the facing, so without this a hard lateral command could
+        land the swing foot across the stance foot."""
         left = self._left_dir(psi)
         lateral = self.sy if swing_side == Side.LEFT else -self.sy
         foot_xy = np.asarray(centre, float)[:2] + lateral * left

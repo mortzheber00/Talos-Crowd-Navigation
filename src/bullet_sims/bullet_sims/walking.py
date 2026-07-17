@@ -84,7 +84,7 @@ TOUCHDOWN_FZ = 475.0       # [N]
 # ---- runtime parameters (defaults; override at launch via ROS 2 params, e.g.
 #   ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=true )
 SCENARIO = "random"              # crowd scenario: head_on | crossing | circle | corridor | random
-PEDESTRIAN_SENSOR_DATA = False    # True: depth-camera perception; False: ground-truth states
+PEDESTRIAN_SENSOR_DATA = True    # True: depth-camera perception; False: ground-truth states
 
 
 ################################################################################
@@ -837,6 +837,7 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         # sampling it once per step at the transition aliases that oscillation.
         v_cmd_acc += v_cmd
         v_cmd_n += 1
+        robot.record_com(com)                   # CoM trail for the viewer overlay
 
         # --- navigation logging ---
         if i >= 0:
@@ -860,9 +861,24 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         ) if a is not None]
         goal_marker = debug_viz.point_marker(ROBOT_GOAL, z=0.15, radius=0.12,
                                              rgba=(1.0, 0.2, 0.2, 1.0))
-        # yellow foot-shaped box at the next planned footstep
-        boxes = [debug_viz.footstep_box(next_step)] if next_step is not None else []
-        debug_viz.draw_scene(simulator, arrows=arrows, points=[goal_marker], boxes=boxes)
+        # orange foot-shaped box at the next planned footstep, fading blue/red
+        # boxes at the executed footstep history, violet spheres for the CoM
+        # trail. Colors are dark/saturated with an alpha floor so they stay
+        # readable on the light tiled floor (floor_ambience); the old white
+        # trail and near-zero history alphas washed out on it.
+        boxes = ([debug_viz.footstep_box(next_step, rgba=(1.0, 0.5, 0.0, 0.9))]
+                 if next_step is not None else [])
+        hist = robot.footstep_history
+        for age, fs in enumerate(reversed(hist)):
+            alpha = 0.2 + 0.55 * (1.0 - age / max(len(hist), 1))
+            color = ((0.05, 0.25, 0.95, alpha) if fs.side == Side.LEFT
+                     else (0.85, 0.10, 0.05, alpha))
+            boxes.append(debug_viz.footstep_box(fs, rgba=color))
+        points = [goal_marker]
+        points += [debug_viz.point_marker(p[:2], z=0.02, radius=0.02,
+                                          rgba=(0.55, 0.0, 0.75, 0.85))
+                   for p in robot.com_trail]
+        debug_viz.draw_scene(simulator, arrows=arrows, points=points, boxes=boxes)
 
         # --- step transition: pick/plan the next footstep, build swing spline ---
         if i >= 0 and i % conf.no_sim_per_step == 0:
@@ -902,6 +918,7 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                 # for the first no_mpc_samples_per_step samples, so the horizon index
                 # restarts to stay phase-aligned
                 k = 0
+            robot.record_footstep(next_step)
             T0_swing = robot.swingFootPose()
             T1_swing = next_step.poseInWorld()
             swing_trajectory = SwingFootTrajectory(T0_swing, T1_swing, conf.step_dur)

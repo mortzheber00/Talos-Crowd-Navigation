@@ -1,3 +1,5 @@
+from collections import deque
+
 import numpy as np
 import pinocchio as pin
 import mujoco
@@ -55,6 +57,13 @@ class Talos:
         ########################################################################
         self.zmp = None
         self.dcm = None
+
+        ########################################################################
+        # trajectory recording for the in-sim overlay (executed footsteps +
+        # CoM trail); bounded so the viewer's user_scn geom budget holds
+        ########################################################################
+        self._footstep_history = deque(maxlen=24)
+        self._com_trail = deque(maxlen=150)
 
         ########################################################################
         # sensors
@@ -272,6 +281,33 @@ class Talos:
             return self.stack.get_placement_LF()
         else:
             raise ValueError("Invalid side for support foot: {}".format(self.support_foot))
+
+    ############################################################################
+    # trajectory recording (for the in-sim debug overlay)
+    ############################################################################
+
+    def record_footstep(self, footstep):
+        """Remember an executed/committed footstep for the viewer overlay.
+        Call once per step transition."""
+        self._footstep_history.append(footstep)
+
+    def record_com(self, com_xyz, min_dist=0.05):
+        """Append a CoM sample to the trail if it moved at least min_dist [m]
+        since the last recorded point. Call every tick (cheap)."""
+        p = np.asarray(com_xyz, dtype=float)[:3].copy()
+        if (not self._com_trail
+                or np.hypot(*(p[:2] - self._com_trail[-1][:2])) >= min_dist):
+            self._com_trail.append(p)
+
+    @property
+    def footstep_history(self):
+        """Executed footsteps, oldest first (bounded)."""
+        return list(self._footstep_history)
+
+    @property
+    def com_trail(self):
+        """Recorded CoM positions, oldest first (bounded, decimated)."""
+        return list(self._com_trail)
 
     def publish(self):
         # Einheitlichen Zeitstempel generieren. Wird gespeichert, damit

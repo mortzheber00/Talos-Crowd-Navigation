@@ -290,6 +290,109 @@ while running:
         # → obstacles2d() ready für ORCA
 ```
 
+## Erweiterung (2026-07-16): 4-Kamera-Rundumsicht (360°)
+
+Die oben beschriebene Pipeline lief ursprünglich auf der einen Front-RGB-D-Kamera
+(`rgbd_depth_cam`, deckt sich mit dem URDF-`rgbd_optical_frame`). Für ORCA reicht
+ein ~90°-Sichtfeld nach vorne aber nicht — ein Fußgänger seitlich oder hinter dem
+Roboter bleibt unsichtbar. Die Pipeline wurde daher um vier zusätzliche
+Weitwinkel-Kameras erweitert, die zusammen 360° abdecken.
+
+### Montage
+
+```python
+percep_fovy, percep_w, percep_h = 90.0, 320, 240   # fovy=90° @ 4:3 -> ~106° horizontal
+percep_radial = 0.15                                # [m] Versatz entlang Blickrichtung
+
+for k in range(4):
+    yaw = k * np.pi / 2.0                           # 0, 90, 180, 270 deg
+    sim.addCameraToLink(
+        'head_2_link', name=f'percep_cam_{k}',
+        pos=[percep_radial*cos(yaw), percep_radial*sin(yaw), camera_pos[2]],
+        orientation=None, yaw=yaw,
+        fovy=percep_fovy, width=percep_w, height=percep_h)
+```
+
+- Alle 4 Kameras hängen am selben Link (`head_2_link`) wie die Frontkamera, sind
+  aber per `yaw` um die Kopf-Hochachse gedreht — `addCameraToLink` rotiert dafür
+  die Standard-"schau nach vorne"-Orientierung um `Rz(yaw)`, bevor sie ins
+  Body-Frame konvertiert wird.
+- **106° statt 90° Rasterabstand**: Das horizontale FOV ist bei fovy=90° und
+  4:3-Bildformat größer als der 90°-Versatz zwischen den Kameras → benachbarte
+  Sichtfelder überlappen sich an den Nähten. Das ist bewusst so gewählt (siehe
+  Clip-Guard unten).
+- **0.15 m radialer Versatz**: Eine Kamera exakt im Kopfzentrum rendert 0 Pixel,
+  weil das Kopf-Mesh die Sicht komplett verschluckt (nur die Frontkamera
+  funktioniert dort, weil das Mesh nach vorne offen ist). Jede Surround-Kamera
+  wird deshalb 0.15 m entlang ihrer eigenen Blickrichtung nach außen versetzt.
+  Verifiziert: 6/6 Test-Fußgänger sichtbar, 6-8 cm Positionsfehler.
+- Geringere Auflösung als die Frontkamera (320×240 statt der RGB-D-Auflösung),
+  weil bei 30 Hz pro Frame jetzt 4× depth+seg gerendert wird — Kompromiss
+  zwischen Sichtfeld und Renderkosten.
+- Jede Kamera bekommt ihre eigene Pinhole-Intrinsik `K` (`_pinhole_K(fovy, w, h)`),
+  da FOV/Auflösung von der Frontkamera abweichen.
+- `rgbd_depth_cam` bleibt separat bestehen und beliefert weiterhin den echten
+  ROS-Depth-Topic/Pointcloud; die 4 Surround-Kameras (`self._percep_cams`)
+  werden ausschließlich intern von `update_obstacles()` genutzt und erzeugen
+  keinen eigenen ROS-Topic.
+
+### Datenfluss mit 4 Kameras (pro Perceptions-Tick, ~30 Hz)
+
+```
+for cam in [percep_cam_0 .. percep_cam_3]:
+    depth, seg   = get_depth_and_seg_image(camera=cam)   # 1 Renderer, 1 update_scene()
+    cam_pos, R_wc = get_camera_pose(camera=cam)           # DIESE Kamera-Pose
+    R_w_opt = R_wc @ diag([1,-1,-1])                       # MuJoCo -> ROS Optical
+
+    for jedes getrackte Geom:
+        mask = segmentation-Maske für Geom-ID
+        (u, v, Z) -> Pinhole-Rückprojektion mit cam-eigenem K
+        pts_world = (R_w_opt @ [X,Y,Z]).T + cam_pos
+        pts[geom_name].append(pts_world[:, :2])   # sammelt über alle 4 Kameras
+
+# nach der Kamera-Schleife, pro Geom:
+xy = np.vstack(pts[geom_name])   # <- der eigentliche "Merge"
+centroid, radius, center = wie im Single-Cam-Fall (2r/pi-Korrektur etc.)
+```
+
+### Wie der Punktwolken-Merge fehlerfrei funktioniert
+
+Der Merge ist absichtlich so simpel wie möglich gehalten: **kein** ICP, **keine**
+Kalman-Fusion, **keine** Gewichtung zwischen Kameras — nur ein `np.vstack` der
+Weltkoordinaten-Punktlisten. Das funktioniert fehlerfrei, weil:
+
+1. **Jede Kamera transformiert unabhängig korrekt ins Weltframe.** `get_camera_pose(camera=cam)`
+   liefert `cam_pos`/`R_wc` für genau diese eine Kamera; die Rückprojektion nutzt
+   deren eigenes `K` und deren eigene Rotation. Ein Punkt, der von `percep_cam_2`
+   stammt, landet also an derselben Weltkoordinate wie ein Punkt derselben
+   Zylinderoberfläche, gesehen von `percep_cam_0` — es gibt keinen gemeinsamen,
+   potenziell fehlerhaften Zwischenschritt.
+2. **Der 0.15 m Montageversatz zwischen den 4 Kameras ist vernachlässigbar**
+   gegenüber typischen Fußgänger-Abständen (Meter-Bereich). Die vier Kameras
+   verhalten sich für die Geometrie der Szene praktisch wie eine einzelne
+   omnidirektionale Kamera an einem Punkt — deshalb ist ein reines "alle Punkte
+   in einen Topf werfen" ohne Registrierung zulässig.
+3. **Überlappende Sichtfelder an den Nähten** (106° FOV bei 90°-Rasterung)
+   stellen sicher, dass ein Objekt an einer Kamerakante nie komplett aus dem Bild
+   fällt, sondern von der Nachbarkamera mit aufgenommen wird.
+4. **Der Rand-Clip-Guard nutzt genau diese Überlappung**: Für jede Kamera wird
+   vermerkt, ob deren Beitrag zu einem Geom den linken/rechten Bildrand berührt
+   (`clip[name]`). Nur wenn *alle* beitragenden Kameras gleichzeitig
+   randclippen (`all(clip[name])`), wird der alte Radius beibehalten — denn ein
+   wirklich vollständig sichtbarer Bogen kann wegen der Überlappung nie in
+   *allen* Ansichten gleichzeitig abgeschnitten sein. Andernfalls greift nur das
+   1%/Frame-Schrumpf-Limit.
+5. **`MIN_OBSTACLE_PIXELS` wird über alle 4 Kameras summiert**, nicht pro Kamera
+   geprüft — ein Track gilt erst als verdeckt/verloren, wenn er in *keiner* der
+   vier Sichten mehr genug Pixel liefert. Das verhindert unnötige Stale-Marker,
+   wenn z. B. nur eine Kamera durch einen anderen Fußgänger kurz verdeckt ist.
+
+Der verbleibende Fehler nach dem Merge ist geometrisch identisch zum Single-Cam-Fall
+(Frontflächen-Bias, Pixelquantisierung) — der Merge selbst führt keine neue
+Fehlerquelle ein, er vergrößert lediglich die Anzahl der zur Schätzung
+beitragenden Oberflächenpunkte und die Wahrscheinlichkeit, dass ein Objekt
+überhaupt sichtbar ist.
+
 ## Vor- und Nachteile
 
 ### ✅ Vorteile

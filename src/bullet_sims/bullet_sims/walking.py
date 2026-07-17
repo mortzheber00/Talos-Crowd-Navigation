@@ -45,7 +45,7 @@ CIRCLE_CLOCKWISE = False   # False = curve left/CCW, True = curve right/CW
 # False = omnidirectional (fixed facing, side-steps along the curve) -> robust: reuses
 #         the straight-line gait, no body rotation, best for bounded curves (avoidance).
 # True  = turn the whole body to face the path -> more natural, harder to stabilise.
-CIRCLE_FACE_PATH = False
+CIRCLE_FACE_PATH = True
 
 # robot navigation: goal it heads toward, and the arrow display scale.
 # v_cmd (from ORCA) now DRIVES the reactive footstep planner; green arrow = v_cmd.
@@ -57,7 +57,7 @@ REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MOD
 # blended gait knobs (A/B): TURN_GAIN=0 -> pure fixed-facing side-step (the old
 # stable mode); 1 -> turn at the full MAX_DYAW_DEG rate limit every step.
 TURN_GAIN = 0.5            # fraction of the heading error turned per step
-MAX_DYAW_DEG = 12.0         # [deg] max facing change per step
+MAX_DYAW_DEG = 30.0         # [deg] max facing change per step
 # dcm_walker's anti-crossing rule: only the INSIDE foot of a turn advances the
 # heading, so yaw steps once per foot PAIR and the feet are never more than one
 # dpsi apart in yaw. Halves the effective turn rate for a given MAX_DYAW_DEG.
@@ -329,7 +329,9 @@ def _record_step(L, i, t, c, c_dot, c_ddot, t_step_elapsed, swing_trajectory,
     # --- heading / swing-drag diagnostics ---
     L.TORSO_YAW[i] = torso_yaw
     L.TORSO_YAW_RATE[i] = torso_yaw_rate
-    psi_des_rel = (heading_des - yaw_sup0 + np.pi) % (2 * np.pi) - np.pi
+    # heading_des is unwrapped (see _run_loop), so this is the continuous turn
+    # since the start -- do NOT re-wrap it, or the plots/turn-sign flip past 180 deg
+    psi_des_rel = heading_des - yaw_sup0
     L.HEADING_DES[i] = psi_des_rel
     L.TURN_SIGN[i] = np.sign(psi_des_rel)
     if swing_trajectory is not None:
@@ -819,7 +821,14 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     T_sup0 = robot.supportFootPose()
     yaw_sup0 = np.arctan2(T_sup0.rotation[1, 0], T_sup0.rotation[0, 0])
     torso_yaw = 0.0                             # filtered heading (delta from start)
-    heading_des = yaw_sup0                      # desired heading = current step target yaw
+    # heading_des is CONTINUOUS (unwrapped): it accumulates the shortest yaw
+    # increment each step rather than being read straight off arctan2. A sustained
+    # turn passes +/-180 deg, and arctan2 is confined to [-pi, pi] -- taking it raw
+    # made heading_des jump +pi -> -pi at the branch cut, so torso_yaw (already
+    # slewed to ~+pi) saw a ~-2pi error and drove the torso a full turn BACKWARDS
+    # mid-circle. Unwrapping here also removes the need to wrap psi_des below.
+    heading_des = yaw_sup0                      # desired heading (unwrapped)
+    heading_meas_prev = yaw_sup0                # last raw arctan2 reading, for unwrapping
     TORSO_YAW_LP = 0.01                         # low-pass gain per sim step
 
     # AM yaw feedforward: I_zz about the CoM from the centroidal composite
@@ -976,11 +985,17 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             # left turn and the loaded foot spins instead of yielding.
             if TORSO_YAW_SOURCE == "support_meas":
                 T_sup_now = robot.supportFootPose()      # MEASURED, just planted
-                heading_des = np.arctan2(T_sup_now.rotation[1, 0],
-                                         T_sup_now.rotation[0, 0])
+                yaw_now = np.arctan2(T_sup_now.rotation[1, 0],
+                                     T_sup_now.rotation[0, 0])
             else:                                        # "swing_target" (legacy)
-                heading_des = np.arctan2(next_step.pose.rotation[1, 0],
-                                         next_step.pose.rotation[0, 0])
+                yaw_now = np.arctan2(next_step.pose.rotation[1, 0],
+                                     next_step.pose.rotation[0, 0])
+            # Accumulate the SHORTEST increment onto the unwrapped heading, so a
+            # sustained turn walks through +/-180 deg without arctan2's branch cut
+            # flipping the torso reference by 2*pi (see heading_des's init).
+            d_head = (yaw_now - heading_meas_prev + np.pi) % (2 * np.pi) - np.pi
+            heading_des += d_head
+            heading_meas_prev = yaw_now
 
         # --- update the mpc every no_sim_per_mpc steps ---
         if i >= 0 and i % conf.no_sim_per_mpc == 0:
@@ -1054,7 +1069,10 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
 
             # steer the torso toward the desired heading (fixed in omnidirectional
             # walking; only turns if the footsteps carry yaw)
-            psi_des = (heading_des - yaw_sup0 + np.pi) % (2 * np.pi) - np.pi
+            # NOT wrapped: heading_des is unwrapped, so this is the continuous
+            # accumulated turn since the start. Wrapping it to [-pi, pi] capped the
+            # commanded turn at 180 deg and flipped its sign beyond that.
+            psi_des = heading_des - yaw_sup0
             torso_yaw += TORSO_YAW_LP * (psi_des - torso_yaw)          # low-pass
             # raw slew rate of the commanded torso yaw. Computed every tick (not
             # just when the AM feedforward is on) because it is the signal that

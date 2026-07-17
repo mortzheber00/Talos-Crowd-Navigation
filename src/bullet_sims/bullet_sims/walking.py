@@ -9,18 +9,16 @@ import numpy as np
 import pinocchio as pin
 
 import rclpy
-from rclpy.node import Node
 
 # simulator
 from simulator.mujoco_wrapper import MujocoWrapper as PybulletWrapper
-from simulator.robot import Robot
 
 # robot configs
 import bullet_sims.talos_conf as conf
 from bullet_sims.tsid_wrapper import TSIDWrapper
 
 # modules
-from bullet_sims.footstep_planner import Side, FootStepPlanner, FootStep, other_foot_id
+from bullet_sims.footstep_planner import Side, FootStepPlanner, other_foot_id
 from bullet_sims.foot_trajectory import SwingFootTrajectory
 from bullet_sims.talos import Talos
 from bullet_sims.lip_mpc import LIPMPC, LIPInterpolator, generate_zmp_reference, generate_yaw_reference
@@ -30,8 +28,6 @@ from bullet_sims.floor_ambience import setup_floor_ambience
 # crowd
 from orca_nav.robot_orca import RobotORCA
 from orca_nav import debug_viz
-
-# crowd
 from orca_nav import scenarios
 from orca_nav.pedestrian import PedestrianSimulator
 
@@ -40,77 +36,50 @@ from orca_nav.pedestrian import PedestrianSimulator
 
 # footstep path for the walking demo: "line" (straight) or "circle" (curved)
 WALK_MODE = "line"
-CIRCLE_RADIUS = 1.5     # [m] radius of the centre path when WALK_MODE == "circle"
+CIRCLE_RADIUS = 1.5        # [m] radius of the centre path when WALK_MODE == "circle"
 CIRCLE_CLOCKWISE = False   # False = curve left/CCW, True = curve right/CW
-# False = omnidirectional (fixed facing, side-steps along the curve) -> robust: reuses
-#         the straight-line gait, no body rotation, best for bounded curves (avoidance).
-# True  = turn the whole body to face the path -> more natural, harder to stabilise.
-CIRCLE_FACE_PATH = True
+CIRCLE_FACE_PATH = True    # True: turn the body to face the path. False: fixed facing,
+                           # side-stepping along the curve (reuses the straight gait).
 
-# robot navigation: goal it heads toward, and the arrow display scale.
-# v_cmd (from ORCA) now DRIVES the reactive footstep planner; green arrow = v_cmd.
 ROBOT_GOAL = (4.0, 0.0)    # world (x, y) navigation goal
 ARROW_SCALE = 3.0          # visual stretch so the slow v_cmd arrow is visible
-WALK_DURATION = 30.0       # [s] max walk time (reactive walking has no fixed step count)
+WALK_DURATION = 30.0       # [s] max walk time
 REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MODE plan
 
-# blended gait knobs (A/B): TURN_GAIN=0 -> pure fixed-facing side-step (the old
-# stable mode); 1 -> turn at the full MAX_DYAW_DEG rate limit every step.
-TURN_GAIN = 0.5            # fraction of the heading error turned per step
-MAX_DYAW_DEG = 30.0         # [deg] max facing change per step
-# dcm_walker's anti-crossing rule: only the INSIDE foot of a turn advances the
-# heading, so yaw steps once per foot PAIR and the feet are never more than one
-# dpsi apart in yaw. Halves the effective turn rate for a given MAX_DYAW_DEG.
-ALTERNATE_YAW = True
+TURN_GAIN = 0.5            # fraction of the heading error turned per step (0 = fixed facing)
+MAX_DYAW_DEG = 30.0        # [deg] max facing change per step
+ALTERNATE_YAW = True       # only the inside foot of a turn advances the heading, so the
+                           # feet are never more than one dpsi apart in yaw and cannot
+                           # cross. Halves the effective turn rate.
 
-# angular-momentum yaw feedforward: the AM task's reference is ZERO by default,
-# which is a standing "do not rotate" order that OPPOSES every turn. Feeding
-# L_z = I_zz * yaw_rate instead lets the task PERMIT the turn's spin while still
-# regulating x/y AM to zero. AM_YAW_FF = 0 -> zero reference (legacy).
-# W_AM is written into conf.w_am BEFORE the TSIDWrapper is built, so it must be
-# set in main(), not here.
-AM_YAW_FF = 8.1            # gain on the L_z = I_zz * yaw_rate feedforward
-W_AM = 2e-6               # AM task weight (1e-4 = decorative; 1e-2 = it bites)
-AM_YAW_RATE_TAU = 0.0     # [s] low-pass on the yaw rate; 0 = RAW (unfiltered)
+# Angular-momentum yaw feedforward. The AM task's reference defaults to zero, a
+# "do not rotate" order that opposes every turn; feeding L_z = I_zz * yaw_rate
+# instead lets it permit the turn's spin while still regulating x/y AM to zero.
+AM_YAW_FF = 8.1            # gain on the L_z feedforward; 0 = zero reference
+W_AM = 2e-6                # AM task weight. Applied in main(), since the task is built
+                           # with its weight and never re-weighted afterwards.
+AM_YAW_RATE_TAU = 0.0      # [s] low-pass on the yaw rate; 0 = unfiltered
 
-# What the torso/pelvis yaw is steered to:
-#   "support_meas"  - the MEASURED yaw of the foot that is actually planted.
-#                     Keeps hip yaw near zero, so a turn never spends the left
-#                     hip's 20 deg of inboard range on a pelvis lead.
-#   "swing_target"  - the yaw of the NEXT footstep (legacy). Puts the pelvis one
-#                     step AHEAD of the planted feet; measured 2026-07-16 to wind
-#                     leg_left_1 to its -20 deg stop at ~19 deg facing, after
-#                     which the loaded inside foot spins (1188 deg/s) and falls.
-# Straight walking is unaffected either way (both yaws are 0).
+# What the torso/pelvis yaw is steered to. Straight walking is unaffected either
+# way, since both yaws are 0.
+#   "support_meas" - the measured yaw of the planted foot; keeps hip yaw near zero.
+#   "swing_target" - the yaw of the next footstep. Leads the planted feet by a step,
+#                    spending leg_left_1's 20 deg of inboard range on a lead the gait
+#                    does not need; the turn then stalls at ~19 deg of facing.
 TORSO_YAW_SOURCE = "support_meas"
 
-# MPC state feedback: fraction of the MEASURED CoM state fed into the MPC (and
-# back into the LIP interpolator) at every MPC tick.
-#   0 = the LEGACY OPEN LOOP. x_k was `interpolator.x`, so the MPC planned from
-#       its own integration and the robot was never in the loop at all:
-#           MPC --u--> interpolator --c_ref--> TSID --> robot
-#            ^                     |
-#            +-------- x_k --------+          (robot not in this loop)
-#       LIP-vs-robot model error then had nothing to correct it and integrated
-#       without bound. Measured 2026-07-16: |CoM_ref - CoM_real| 5 -> 105 mm in
-#       6 s of turning, with NO QP failure, the swing foot tracking to 5 mm and
-#       hip yaw nowhere near its stops. Walking STRAIGHT it stayed 3-7 mm flat,
-#       because the 2D LIP is an accurate model of straight symmetric walking --
-#       a turn adds centripetal/angular-momentum dynamics the LIP has no state
-#       for, so the mismatch is larger and integrates faster. This is why the
-#       failure looked turn-specific, and why no gain touched it: raising kp_com
-#       only makes the robot track a DRIFTING reference more faithfully.
-#   1 = full state feedback (textbook MPC = receding horizon + state feedback).
-# Lower it toward ~0.1 if feeding raw measurement makes the QP jittery.
+# Fraction of the measured CoM state fed into the MPC (and back into the LIP
+# interpolator) each MPC tick. At 0 the MPC plans from its own integration with the
+# robot outside the loop, so LIP-vs-robot model error integrates without bound; 1 is
+# full state feedback. Lower toward ~0.1 if raw measurement makes the QP jittery.
 MPC_STATE_FEEDBACK = 1.0
 
-# touchdown detection from the swing foot's FT sensor: once its measured normal
-# force exceeds this in the descent half of the step, the swing reference is
-# FROZEN at its current pose -- otherwise an early contact makes the motion task
-# keep driving the foot along the spline into the ground, loading a sole edge
-# and tilting the foot. Must stay above the sensed swing-leg foot weight
-# (~25-30 N). Set to 0 to disable.
-TOUCHDOWN_FZ = 475.0        # [N]
+# Swing-foot touchdown detection. Once the measured normal force exceeds this in the
+# descent half of a step, the swing reference is frozen at its current pose; without
+# it an early contact keeps driving the foot along the spline into the ground, loading
+# a sole edge and tilting the foot. Must stay above the sensed swing-leg foot weight
+# (~25-30 N). 0 disables.
+TOUCHDOWN_FZ = 475.0       # [N]
 
 # ---- runtime parameters (defaults; override at launch via ROS 2 params, e.g.
 #   ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=true )
@@ -141,9 +110,9 @@ def _setup_simulator():
 def _setup_crowd(simulator):
     """Spawn the pedestrian crowd.
 
-    IMPORTANT: this must run *before* the robot is created. Adding pedestrian
-    bodies changes the MuJoCo model, which forces a recompile that resets
-    simulation state; doing it after the robot would wipe the robot's pose.
+    Must run before the robot is created: adding pedestrian bodies changes the MuJoCo
+    model, forcing a recompile that resets simulation state and would wipe the
+    robot's pose.
     """
     crowd = PedestrianSimulator(simulator, radius=0.3, max_speed=1.3,
                                 pref_perturb=0.05, personal_space=0.3)
@@ -164,15 +133,12 @@ def _create_robot(simulator):
 
 
 def _plan_from(planner, T_support_w, support_side, no_steps):
-    """Build the footstep plan ANCHORED at the given support foot, plus the
-    ZMP/yaw references that match it.
+    """Build the footstep plan anchored at the given support foot, plus the matching
+    ZMP/yaw references.
 
-    plan[0] is the support foot itself (stepping starts at plan[1]), else the
-    first swing would lift the loaded foot. The last step is duplicated twice so
-    the MPC's receding horizon never looks past the end of the plan.
-
-    Called once at startup AND again at every step transition with the MEASURED
-    support foot -- see the re-anchor comment in _run_loop.
+    plan[0] is the support foot itself and stepping starts at plan[1], otherwise the
+    first swing would lift the loaded foot. The last step is duplicated twice so the
+    MPC's receding horizon never looks past the end of the plan.
     """
     if WALK_MODE == "circle":
         plan = planner.planCircle(T_support_w, support_side, no_steps=no_steps,
@@ -220,13 +186,11 @@ _ABORT = False          # set by Ctrl-C; polled by _run_loop's sim loop
 
 
 def _install_sigint_handler():
-    """Make Ctrl-C stop the sim loop *cleanly* instead of killing the process, so
-    an aborted run still reaches the plots/reports (they live after _run_loop
-    returns, and the log buffers are NaN-filled -- an early exit just leaves a NaN
-    tail that matplotlib and the isfinite-gated reports both skip).
+    """Stop the sim loop cleanly on Ctrl-C instead of killing the process, so an
+    aborted run still reaches the plots and reports. The log buffers are NaN-filled,
+    so an early exit just leaves a NaN tail that both skip.
 
-    A second Ctrl-C restores the default handler and aborts hard, so a wedged run
-    is still killable.
+    A second Ctrl-C restores the default handler, keeping a wedged run killable.
     """
     global _ABORT
     _ABORT = False
@@ -273,28 +237,24 @@ def _allocate_logs(N_sim, n_peds=0):
         FZ_LEFT_PB=nan(N_sim), FZ_RIGHT_PB=nan(N_sim),
         FZ_LEFT_PIN=nan(N_sim), FZ_RIGHT_PIN=nan(N_sim),
         # --- heading / swing-drag diagnostics ---
-        # Is the torso-yaw slew after a heading_des jump dragging the swing leg
-        # inward? These are the signals that answer it.
         TORSO_YAW=nan(N_sim),        # commanded torso yaw (delta from spawn) [rad]
         HEADING_DES=nan(N_sim),      # step's target heading (delta from spawn) [rad]
         TORSO_YAW_RATE=nan(N_sim),   # d(torso_yaw)/dt [rad/s]
         SWING_LAT_DEV=nan(N_sim),    # swing foot measured-minus-spline, along the
-                                     # facing's LEFT axis [m] (+ = drifted left)
+                                     # facing's left axis [m] (+ = drifted left)
         SWING_SIDE=nan(N_sim),       # +1 = LEFT swinging, -1 = RIGHT
         TURN_SIGN=nan(N_sim),        # +1 = turning left, -1 = right, 0 = straight
-        # measured foot YAW in the world. A foot that is in contact must not
-        # rotate; if it does, it is spinning against friction.
+        # measured foot yaw in the world; a foot in contact that rotates is
+        # spinning against friction
         LF_YAW=nan(N_sim), RF_YAW=nan(N_sim),
-        # hip-yaw joints. ASYMMETRIC URDF limits: leg_left_1 [-20, +90] deg,
-        # leg_right_1 [-90, +20] deg. Saturation here is the standing suspect
-        # for the turn wall.
+        # hip-yaw joints. Asymmetric URDF limits: leg_left_1 [-20, +90] deg,
+        # leg_right_1 [-90, +20] deg.
         HIP_L=nan(N_sim), HIP_R=nan(N_sim),
-        # Torso yaw, MEASURED, and its two (and only two) sources: the frame
-        # Jacobian's yaw row is nonzero on exactly root_joint (pelvis) and
-        # torso_1_joint (waist), both with coefficient 1.0. So
-        #     torso_yaw_meas = pelvis_yaw_meas + q_torso1
-        # Splitting it says WHICH route is blocked: the pelvis (hip-limited) or
-        # the waist (pinned by kp_posture[12] = 5000).
+        # Measured torso yaw and its only two sources: the frame Jacobian's yaw row
+        # is nonzero on exactly root_joint (pelvis) and torso_1_joint (waist), both
+        # with coefficient 1.0, so torso_yaw_meas = pelvis_yaw_meas + q_torso1.
+        # Splitting it says which route is blocked: the hip-limited pelvis, or the
+        # waist (pinned by kp_posture[12] = 5000).
         TORSO_YAW_MEAS=nan(N_sim),   # measured yaw of torso_2_link [rad]
         PELVIS_YAW_MEAS=nan(N_sim),  # measured yaw of base_link [rad]
         Q_TORSO1=nan(N_sim),         # waist yaw joint angle [rad]
@@ -318,8 +278,8 @@ def _record_step(L, i, t, c, c_dot, c_ddot, t_step_elapsed, swing_trajectory,
     q_now = robot.robot.q()
     L.HIP_L[i] = np.degrees(q_now[7])
     L.HIP_R[i] = np.degrees(q_now[13])
-    # measured torso yaw and its decomposition (q[19] = torso_1_joint: the
-    # free-flyer takes q[0:7], and torso_1 is the 13th actuated joint)
+    # measured torso yaw and its decomposition (q[19] = torso_1_joint, the 13th
+    # actuated joint after the free-flyer's q[0:7])
     T_torso_m, _ = robot.stack.torsoState()
     T_base_m, _ = robot.stack.baseState()
     L.TORSO_YAW_MEAS[i] = _yaw(T_torso_m)
@@ -329,18 +289,17 @@ def _record_step(L, i, t, c, c_dot, c_ddot, t_step_elapsed, swing_trajectory,
     # --- heading / swing-drag diagnostics ---
     L.TORSO_YAW[i] = torso_yaw
     L.TORSO_YAW_RATE[i] = torso_yaw_rate
-    # heading_des is unwrapped (see _run_loop), so this is the continuous turn
-    # since the start -- do NOT re-wrap it, or the plots/turn-sign flip past 180 deg
+    # heading_des is unwrapped (see _run_loop), so this is the continuous turn since
+    # the start. Do not re-wrap it, or the plots and turn sign flip past 180 deg.
     psi_des_rel = heading_des - yaw_sup0
     L.HEADING_DES[i] = psi_des_rel
     L.TURN_SIGN[i] = np.sign(psi_des_rel)
     if swing_trajectory is not None:
         L.SWING_SIDE[i] = 1.0 if robot.swing_foot == Side.LEFT else -1.0
-        # measured swing foot vs the pose ACTUALLY COMMANDED this tick (T_cmd),
-        # projected onto the current facing's left axis. It must be the commanded
-        # pose, not swing_trajectory.evaluate(): once TOUCHDOWN_FZ freezes the
-        # reference the spline keeps running, and scoring against the spline
-        # would book the intentional freeze as tracking error.
+        # Measured swing foot vs the pose actually commanded this tick, projected
+        # onto the current facing's left axis. It must be T_cmd rather than
+        # swing_trajectory.evaluate(): the spline keeps running after TOUCHDOWN_FZ
+        # freezes the reference, and would book the freeze as tracking error.
         T_ref = T_cmd if T_cmd is not None else swing_trajectory.evaluate(
             t_step_elapsed)[0]
         H_sw = (robot.stack.get_placement_LF() if robot.swing_foot == Side.LEFT
@@ -453,8 +412,6 @@ def _plot_results(L):
         ax.legend(fontsize=7)
 
     fig.tight_layout()
-    # save next to this package (repo-relative) instead of a hardcoded absolute
-    # path, and never let a failed save/show abort the run
     plots_dir = os.environ.get(
         'WALKING_PLOTS_DIR',
         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plots', 'T7'))
@@ -465,8 +422,7 @@ def _plot_results(L):
         print(f"saved plots to {out_path}")
     except OSError as e:
         print(f"could not save plots to {plots_dir}: {e}")
-    # Only pop up a (blocking) window if explicitly requested; otherwise just save.
-    # Interactive windows can be un-closeable over VNC, so default to save-only.
+    # opt-in display: interactive windows can be un-closeable over VNC
     if os.environ.get('WALKING_SHOW_PLOTS'):
         try:
             plt.show()
@@ -546,10 +502,10 @@ def _plot_heading(L):
     """Heading/swing-drag diagnostic: does the torso-yaw slew after a heading_des
     jump drag the swing leg toward the inside of the turn?
 
-    Read it as: HEADING_DES is a stair (it only moves at a step transition, and
-    with ALTERNATE_YAW only on the inside foot's step). TORSO_YAW slews to each
-    riser over ~0.2 s. If SWING_LAT_DEV goes inward during exactly those slews,
-    and only for one swing side, the slew is dragging the swing leg.
+    HEADING_DES is a stair, moving only at a step transition (and with ALTERNATE_YAW,
+    only on the inside foot's step); TORSO_YAW slews to each riser over ~0.2 s. If
+    SWING_LAT_DEV goes inward during those slews and only for one swing side, the
+    slew is dragging the swing leg.
     """
     import os
     import matplotlib.pyplot as plt
@@ -596,8 +552,6 @@ def _plot_heading(L):
         print(f"saved heading diagnostic to {out_path}")
     except OSError as e:
         print(f"could not save heading diagnostic: {e}")
-    # same opt-in display as _plot_results/_plot_navigation: interactive windows
-    # can be un-closeable over VNC, so default to save-only.
     if os.environ.get('WALKING_SHOW_PLOTS'):
         try:
             plt.show()
@@ -611,11 +565,11 @@ def _plot_heading(L):
 
 def _report_heading(L):
     """Numeric verdict: correlate the torso-yaw slew with the swing drift, per
-    swing side. This is what actually answers 'is the slew dragging the leg'."""
+    swing side."""
     ok = np.isfinite(L.SWING_LAT_DEV) & np.isfinite(L.TORSO_YAW_RATE)
-    # EXCLUDE the fall: once the robot is going down, the swing foot deviates by
-    # tens of cm and the hips blow past their limits, which would dominate every
-    # mean here and say nothing about the gait. Nominal CoM height is ~0.87 m.
+    # Exclude the fall. Once the robot is going down the swing foot deviates by tens
+    # of cm and the hips blow past their limits, which dominates every mean here and
+    # says nothing about the gait. Nominal CoM height is ~0.87 m.
     healthy = L.COM_POS_PB[:, 2] > 0.75
     n_dropped = int((ok & ~healthy).sum())
     ok = ok & healthy
@@ -626,7 +580,7 @@ def _report_heading(L):
         t_bad = L.TIME[~healthy & np.isfinite(L.TIME)]
         print(f"[heading] dropped {n_dropped} samples with CoM < 0.75 m "
               f"(falling, from t={t_bad.min():.2f}s)")
-    # "inward" = toward the turn centre = the sign of the turn.
+    # "inward" = toward the turn centre = the sign of the turn
     turn = np.sign(np.nanmedian(L.TURN_SIGN[ok]))
     print(f"\n[heading] turn direction: {'LEFT' if turn > 0 else 'RIGHT'}")
     print(f"[heading] {'swing side':>10} | {'n':>6} | {'mean lat dev':>12} | "
@@ -649,13 +603,13 @@ def _report_heading(L):
 
 
 def _report_foot_spin(L):
-    """Does a foot in contact SPIN about the vertical as its load drops?
+    """Does a foot in contact spin about the vertical as its load drops?
 
-    A foot resists yaw only through distributed lateral friction over its
-    contact patch, and that resistance scales with the normal force. MuJoCo's
-    condim defaults to 3, so the torsional-friction coefficient never applies.
-    Prediction if that is the mechanism: |d(yaw)/dt| is small while the foot is
-    LOADED and grows sharply while it is LIGHTLY loaded but still down.
+    A foot resists yaw only through distributed lateral friction over its contact
+    patch, which scales with the normal force (MuJoCo's condim defaults to 3, so the
+    torsional-friction coefficient never applies). If that is the mechanism,
+    |d(yaw)/dt| is small while the foot is loaded and grows sharply while it is
+    lightly loaded but still down.
     """
     healthy = L.COM_POS_PB[:, 2] > 0.75
     dt = np.nanmedian(np.diff(L.TIME))
@@ -687,15 +641,12 @@ def _report_foot_spin(L):
 
 
 def _report_drift(L):
-    """WHERE is the reference diverging from the robot?
+    """Where is the reference diverging from the robot?
 
-    Three candidates, all already logged:
-      * CoM   : the LIP interpolator is integrated open-loop from x0 and never
-                re-anchored, so its CoM can walk away from the real one.
-      * ZMP   : commanded vs what the feet actually produce.
-      * feet  : the planted foot vs where the plan wanted it.
-    Whichever grows monotonically is the drift that matters; the others are
-    consequences.
+    Three candidates, all already logged: the CoM (the LIP interpolator can walk away
+    from the real one), the ZMP (commanded vs what the feet produce), and the feet
+    (planted vs planned). Whichever grows monotonically is the drift that matters;
+    the others are consequences.
     """
     healthy = L.COM_POS_PB[:, 2] > 0.75
     t = L.TIME
@@ -718,12 +669,11 @@ def _report_drift(L):
 
 
 def _report_spin_timeline(L):
-    """When does the loaded-foot spin START, relative to the facing angle?
+    """When does the loaded-foot spin start, relative to the facing angle?
 
-    This is the ordering question: if the spin only appears once facing is
-    already large / the robot is already going, it is a SYMPTOM. If it shows up
-    while facing is still small and the gait still looks healthy, it is a
-    CANDIDATE CAUSE.
+    An ordering question: a spin that only appears once facing is already large is a
+    symptom, while one that shows up while facing is still small and the gait still
+    looks healthy is a candidate cause.
     """
     dt = np.nanmedian(np.diff(L.TIME))
     if not np.isfinite(dt) or dt <= 0:
@@ -760,9 +710,9 @@ def _report_spin_timeline(L):
         comz = np.nanmean(L.COM_POS_PB[w, 2])
         hl = L.HIP_L[w]
         hl_s = f"{np.nanmin(hl):+6.1f}..{np.nanmax(hl):+6.1f}"
-        # measured foot yaws, as a delta from spawn -> directly comparable to
-        # 'facing' (the commanded heading). If facing climbs and these do not,
-        # the feet are simply not achieving the yaw they are told to.
+        # measured foot yaws as a delta from spawn, so they compare directly against
+        # 'facing' (the commanded heading): if facing climbs and these do not, the
+        # feet are not achieving the yaw they are told to
         def _delta(arr):
             """mean over this window, as a delta from the run's first samples"""
             fin = arr[np.isfinite(arr)]
@@ -795,9 +745,8 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     L.GOAL = np.asarray(ROBOT_GOAL, dtype=float)
     L.PED_RADII = np.array([r for (_, _, r) in crowd.states()])
 
-    k = 0                                       # MPC index (fixed-plan mode); reset
-                                                # to 0 at each step transition, since
-                                                # the plan is re-anchored there
+    k = 0                                       # MPC index (fixed-plan mode); reset at each
+                                                # step transition, where the plan re-anchors
     mpc_phase = 0                               # MPC-sample index within the current step
     t_step_elapsed = 0.0                        # elapsed time within current step
     t_publish = 0.0                             # last ros publish time
@@ -807,11 +756,9 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     pin_data = robot.stack.model.createData()   # scratch for centroidal queries
     c = c_dot = c_ddot = None                   # latest com reference
 
-    # torso-yaw tracking: the torso task pins the body's heading, so as the feet
-    # yaw around a turn the legs twist and the robot topples. Command the torso
-    # orientation reference to follow the support-foot heading (low-pass filtered
-    # so the reference is smooth). yaw 0 -> unchanged from the spawn orientation,
-    # so straight walking is unaffected.
+    # Torso-yaw tracking: the torso task pins the body's heading, so as the feet yaw
+    # around a turn the legs twist and the robot topples. Steer the torso reference to
+    # follow the support-foot heading instead, low-pass filtered for smoothness.
     T_torso0, _ = robot.stack.torsoState()
     R_torso0 = T_torso0.rotation.copy()
     p_torso0 = T_torso0.translation.copy()
@@ -821,33 +768,29 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     T_sup0 = robot.supportFootPose()
     yaw_sup0 = np.arctan2(T_sup0.rotation[1, 0], T_sup0.rotation[0, 0])
     torso_yaw = 0.0                             # filtered heading (delta from start)
-    # heading_des is CONTINUOUS (unwrapped): it accumulates the shortest yaw
-    # increment each step rather than being read straight off arctan2. A sustained
-    # turn passes +/-180 deg, and arctan2 is confined to [-pi, pi] -- taking it raw
-    # made heading_des jump +pi -> -pi at the branch cut, so torso_yaw (already
-    # slewed to ~+pi) saw a ~-2pi error and drove the torso a full turn BACKWARDS
-    # mid-circle. Unwrapping here also removes the need to wrap psi_des below.
+    # heading_des accumulates the shortest yaw increment each step rather than being
+    # read off arctan2, keeping it continuous. A sustained turn passes +/-180 deg, and
+    # arctan2's branch cut would flip the torso reference by 2*pi there.
     heading_des = yaw_sup0                      # desired heading (unwrapped)
     heading_meas_prev = yaw_sup0                # last raw arctan2 reading, for unwrapping
     TORSO_YAW_LP = 0.01                         # low-pass gain per sim step
 
-    # AM yaw feedforward: I_zz about the CoM from the centroidal composite
-    # inertia at the current (home) posture. Held constant -- it varies with the
+    # I_zz about the CoM for the AM yaw feedforward. Held constant: it varies with
     # posture, but the legs stay near the same configuration through the gait.
-    # (ccrba returns the 6xnv momentum matrix; the composite inertia lands in
-    # pin_data.Ig as a side effect -- that is what carries I_zz.)
+    # ccrba's return value is unused here -- it writes the composite inertia into
+    # pin_data.Ig as a side effect, and that is what carries I_zz.
     pin.ccrba(robot.stack.model, pin_data, robot.robot.q(), robot.robot.v())
     I_zz = float(pin_data.Ig.inertia[2, 2])
     yaw_rate = 0.0                              # d(torso_yaw)/dt, optionally LP'd
     torso_yaw_prev = 0.0
     torso_yaw_rate = 0.0                        # raw d(torso_yaw)/dt (diagnostic)
 
-    # robot ORCA velocity generator: v_cmd toward the goal, avoiding pedestrians
+    # ORCA velocity generator: v_cmd toward the goal, avoiding pedestrians
     robot_ctrl = RobotORCA(ROBOT_GOAL, radius=0.35, max_speed=1.5,
                            desired_speed=1.2, safety_margin=0.2)
 
-    # reactive footstep planner: each step, places the next footstep in the
-    # direction of v_cmd (omnidirectional / fixed facing) and feeds the MPC.
+    # reactive footstep planner: places each next footstep in the direction of
+    # v_cmd and feeds the MPC
     reactive_planner = ReactiveFootStepPlanner(
         conf, ROBOT_GOAL, robot.supportFootPose(),
         conf.no_mpc_samples_per_step, conf.no_mpc_samples_per_horizon,
@@ -878,12 +821,10 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         body_id = robot.robot.id()
         com = simulator.computeComPosition(body_id)
         vcom = simulator.computeComVelocity(body_id)
-        # move the crowd (pedestrians still avoid the robot via ground-truth here)
+        # move the crowd (pedestrians avoid the robot via ground truth either way)
         crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
-        # pedestrian states for the robot come from the ONBOARD DEPTH CAMERA
-        # (only what the robot actually sees), not ground truth. update_obstacles()
-        # refreshes these at the perception rate; obstacles2d() returns the latest
-        # world-frame estimates {id, x, y, r, vx, vy, stale}.
+        # what the robot knows about the pedestrians: onboard depth camera (only what
+        # it can see) or ground truth
         if PEDESTRIAN_SENSOR_DATA:
             ped_states = [(np.array([o['x'], o['y']]), np.array([o['vx'], o['vy']]), o['r'])
                           for o in robot.obstacles2d()]
@@ -891,11 +832,9 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
         v_cmd = robot_ctrl.compute_velocity(com[:2], vcom[:2], ped_states)
         v_pref = robot_ctrl.preferred_velocity(com[:2])
-        # accumulate for the per-step average: ORCA sees the CoM's gait-frequency
-        # lateral sway (+/-0.3 m/s), so the instantaneous v_cmd oscillates at the
-        # step frequency. Sampling it once per step at the transition ALIASES
-        # that oscillation (lateral progress freezes when the sample lands near
-        # zero), so the planner gets the average over the elapsed step instead.
+        # Accumulate for the per-step average. ORCA sees the CoM's gait-frequency
+        # lateral sway (+/-0.3 m/s), so v_cmd oscillates at the step frequency and
+        # sampling it once per step at the transition aliases that oscillation.
         v_cmd_acc += v_cmd
         v_cmd_n += 1
 
@@ -945,19 +884,12 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                 current_swing_side = other_foot_id(swing_side)
                 mpc_phase = 0
             else:
-                # RE-ANCHOR the fixed plan to the MEASURED support foot, every
-                # step. This used to index a plan computed ONCE at t=0
-                # (plan[plan_idx]) with nothing ever comparing it to the robot:
-                # per-step placement error accumulated unbounded, the MPC kept
-                # commanding a CoP inside the PLANNED foot while the real foot
-                # drifted away, and once the gap exceeded the sole (~0.2x0.13 m)
-                # the commanded CoP fell OUTSIDE the real support polygon and
-                # became unrealizable -> the "fine for 8 s, then sudden" fall.
-                # Smaller steps only slowed the accumulation, which is why the
-                # fall moved later but never went away.
-                # Rebuilding from the measured foot keeps the curvature
-                # (dpsi = step_x/radius) but re-zeroes the error each step --
-                # the same thing the reactive planner's regenerate() does.
+                # Re-anchor the fixed plan to the measured support foot every step.
+                # Indexing a plan built once at t=0 lets per-step placement error
+                # accumulate unbounded, until the commanded CoP sits inside the
+                # planned foot but outside the real one and becomes unrealizable.
+                # Rebuilding keeps the curvature (dpsi = step_x/radius) and re-zeroes
+                # the error, as the reactive planner's regenerate() does.
                 swing_side = current_swing_side
                 support_side = other_foot_id(swing_side)
                 robot.setSwingFoot(swing_side)
@@ -966,9 +898,9 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                     planner, robot.supportFootPose(), support_side, no_steps)
                 next_step = plan[1]
                 current_swing_side = other_foot_id(swing_side)
-                # plan[0] is now the CURRENT support foot, and the reference
-                # holds it for the first no_mpc_samples_per_step samples, so the
-                # horizon index restarts at 0 to stay phase-aligned.
+                # plan[0] is now the current support foot, which the reference holds
+                # for the first no_mpc_samples_per_step samples, so the horizon index
+                # restarts to stay phase-aligned
                 k = 0
             T0_swing = robot.swingFootPose()
             T1_swing = next_step.poseInWorld()
@@ -976,34 +908,27 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             t_step_elapsed = 0.0
             swing_frozen = False
             T_frozen = None
-            # Heading the torso/pelvis is steered to. The pelvis yaw costs hip
-            # yaw: hip = foot_yaw - pelvis_yaw, and leg_left_1 has only 20 deg
-            # of NEGATIVE range ([-20,+90]) vs leg_right_1's 90 ([-90,+20]).
-            # Tracking next_step (the SWING TARGET) puts the pelvis a step AHEAD
-            # of the planted feet, which spends that 20 deg budget on a lead the
-            # gait does not need -- the left hip then winds to its -20 stop in a
-            # left turn and the loaded foot spins instead of yielding.
+            # Heading the torso/pelvis is steered to. Pelvis yaw costs hip yaw
+            # (hip = foot_yaw - pelvis_yaw), and leg_left_1 has only 20 deg of
+            # negative range ([-20,+90]) against leg_right_1's 90 ([-90,+20]) --
+            # see TORSO_YAW_SOURCE.
             if TORSO_YAW_SOURCE == "support_meas":
-                T_sup_now = robot.supportFootPose()      # MEASURED, just planted
+                T_sup_now = robot.supportFootPose()
                 yaw_now = np.arctan2(T_sup_now.rotation[1, 0],
                                      T_sup_now.rotation[0, 0])
-            else:                                        # "swing_target" (legacy)
+            else:                                        # "swing_target"
                 yaw_now = np.arctan2(next_step.pose.rotation[1, 0],
                                      next_step.pose.rotation[0, 0])
-            # Accumulate the SHORTEST increment onto the unwrapped heading, so a
-            # sustained turn walks through +/-180 deg without arctan2's branch cut
-            # flipping the torso reference by 2*pi (see heading_des's init).
             d_head = (yaw_now - heading_meas_prev + np.pi) % (2 * np.pi) - np.pi
             heading_des += d_head
             heading_meas_prev = yaw_now
 
         # --- update the mpc every no_sim_per_mpc steps ---
         if i >= 0 and i % conf.no_sim_per_mpc == 0:
-            # Close the loop: plan from the MEASURED CoM, not from the LIP's own
-            # integration (see MPC_STATE_FEEDBACK). The interpolator is re-seeded
-            # to the same state, otherwise c_ref keeps free-running away from the
-            # robot even though the MPC now plans from the truth -- the feedback
-            # has to reach the reference TSID actually tracks, not just the QP.
+            # Plan from the measured CoM rather than the LIP's own integration (see
+            # MPC_STATE_FEEDBACK). The interpolator is re-seeded to the same state:
+            # the feedback has to reach the reference TSID tracks, not just the QP,
+            # or c_ref free-runs away from the robot regardless.
             if MPC_STATE_FEEDBACK > 0.0:
                 com_m = robot.stack.comState()
                 p_m, v_m = com_m.value(), com_m.derivative()
@@ -1012,7 +937,7 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                 x_k = (1.0 - a) * interpolator.x + a * x_meas
                 interpolator.set_state(x_k)
             else:
-                x_k = interpolator.x            # legacy open loop
+                x_k = interpolator.x            # open loop
             if REACTIVE:
                 # ZMP/yaw reference over the horizon from the reactive buffer,
                 # phase-aligned within the current step
@@ -1042,11 +967,8 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             interpolator.integrate(u_k)
             c, c_dot, c_ddot = interpolator.comState()
             robot.stack.setComRefState(c, c_dot, c_ddot)
-            # evaluate the swing-foot spline and update its motion reference.
-            # Touchdown detection: in the descent half of the step, once the
-            # swing foot's FT sensor reports ground contact, FREEZE the
-            # reference at the current pose -- continuing the spline would
-            # drive the foot into the ground and tilt it about a sole edge.
+            # evaluate the swing-foot spline and update its motion reference,
+            # freezing it once the foot lands early (see TOUCHDOWN_FZ)
             if swing_trajectory is not None:
                 if (TOUCHDOWN_FZ > 0 and not swing_frozen
                         and t_step_elapsed > 0.5 * conf.step_dur):
@@ -1067,25 +989,19 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                     robot.updateSwingFootRef(T_swing, V_swing.vector, A_swing.vector)
                     T_cmd = T_swing
 
-            # steer the torso toward the desired heading (fixed in omnidirectional
-            # walking; only turns if the footsteps carry yaw)
-            # NOT wrapped: heading_des is unwrapped, so this is the continuous
-            # accumulated turn since the start. Wrapping it to [-pi, pi] capped the
-            # commanded turn at 180 deg and flipped its sign beyond that.
+            # steer the torso toward the desired heading (only turns if the footsteps
+            # carry yaw). Deliberately not wrapped to [-pi, pi]: heading_des is
+            # unwrapped, so this is the continuous turn accumulated since the start.
             psi_des = heading_des - yaw_sup0
             torso_yaw += TORSO_YAW_LP * (psi_des - torso_yaw)          # low-pass
-            # raw slew rate of the commanded torso yaw. Computed every tick (not
-            # just when the AM feedforward is on) because it is the signal that
-            # says whether a heading_des jump is dragging the swing leg.
+            # computed every tick, not only when the AM feedforward is on: it is also
+            # the diagnostic for whether a heading_des jump drags the swing leg
             torso_yaw_rate = (torso_yaw - torso_yaw_prev) / dt
             torso_yaw_prev = torso_yaw
             cz, sz = np.cos(torso_yaw), np.sin(torso_yaw)
             Rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
             robot.stack.setTorsoRefState(pin.SE3(Rz @ R_torso0, p_torso0))
-            # AM reference: permit the turn's yaw spin instead of fighting it.
-            # yaw_rate is the RAW torso_yaw derivative unless AM_YAW_RATE_TAU>0
-            # (the increment is bursty at step transitions, so the filter is
-            # there to A/B against).
+            # AM reference: permit the turn's yaw spin instead of fighting it
             if AM_YAW_FF != 0.0:
                 if AM_YAW_RATE_TAU > 0.0:
                     a = dt / (AM_YAW_RATE_TAU + dt)
@@ -1094,9 +1010,9 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                     yaw_rate = torso_yaw_rate
                 robot.stack.setAmRefState(
                     np.array([0.0, 0.0, AM_YAW_FF * I_zz * yaw_rate]))
-            # steer the base (pelvis) yaw with the same heading, so the waist
-            # does not absorb the whole turn and the hip-yaw joints don't take
-            # the full foot-vs-body twist (yaw-only task, position row masked)
+            # steer the pelvis with the same heading, so the waist does not absorb the
+            # whole turn and the hip-yaw joints don't take the full foot-vs-body twist
+            # (yaw-only task, position row masked)
             robot.stack.setBaseOriRefState(pin.SE3(Rz @ R_base0, p_base0))
 
         # --- advance the simulation + whole-body control ---
@@ -1163,10 +1079,9 @@ def _read_runtime_params():
 
 
 def main():
-    # NOTE: ros2 run skips the __main__ block, so all setup happens here.
+    # ros2 run skips the __main__ block, so all setup happens here
     simulator = _setup_simulator()
 
-    # apply beautiful tiled floor and lighting
     setup_floor_ambience(simulator._spec)
     simulator._dirty = True
     simulator._ensure_compiled()
@@ -1174,8 +1089,8 @@ def main():
     # runtime parameters (scenario, sensor vs ground truth) -> module globals
     _read_runtime_params()
 
-    # AM task weight must land on conf BEFORE _create_robot builds the TSIDWrapper
-    # (the task is constructed with its weight and never re-weighted afterwards).
+    # must land on conf before _create_robot builds the TSIDWrapper: the AM task is
+    # constructed with its weight and never re-weighted afterwards
     conf.w_am = W_AM
 
     # crowd must be created before the robot (see _setup_crowd)

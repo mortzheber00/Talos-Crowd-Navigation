@@ -7,9 +7,7 @@ import numpy as np
 # Note: no_hands = 30 dof (7 per arm)
 ################################################################################
 
-# Locate the installed talos_description package via the ROS 2 ament index.
-# (The old rospkg lookup is ROS 1 only and always failed under ROS 2, which
-# sent us into a broken fallback path pointing inside install/bullet_sims/lib.)
+# locate the installed talos_description package via the ROS 2 ament index
 from ament_index_python.packages import get_package_share_directory
 talos_description = get_package_share_directory('talos_description')
 
@@ -51,11 +49,10 @@ zmp_margin = 0.02                       # [m] safety margin shrinking the MPC's
 lz = 0.                                 # foot sole height with respect to ankle joint
 
 # Foot collision boxes handed to MujocoWrapper(collision_boxes=...). The URDF's
-# convex-hull foot is a bad sole: dropped flat it makes 3 clustered contacts
-# spanning y[-0.049,-0.006] instead of the full +/-lfy, and its lowest vertex is
-# 16.5 mm below the sole frame TSID uses as the contact plane. A box gives the
-# four corner contacts the lfxp/lfxn/lfyp/lfyn support polygon (the one lip_mpc
-# constrains the ZMP inside) actually assumes.
+# convex-hull foot makes only 3 clustered contacts when dropped flat, and its lowest
+# vertex sits 16.5 mm below the sole frame TSID uses as the contact plane. A box
+# gives the four corner contacts that the lfxp/lfxn/lfyp/lfyn support polygon -- the
+# one lip_mpc constrains the ZMP inside -- assumes.
 sole_z = -0.107                         # sole frame z in leg_*_6_link, from the
                                         # URDF's leg_*_sole_fix_joint origin
 sole_box_half_h = 0.005                 # box half-height; bottom face lands on sole_z
@@ -67,16 +64,11 @@ sole_collision_boxes = {
     for side in ("left", "right")
 }
 
-# Height of the ground plane the footstep planners place steps on. The planners
-# USED to take each step's z from the MEASURED support foot, which made the step
-# height a pure integrator (z_target(n+1) = z_measured(n)) with no reference to
-# the floor at all: any systematic landing bias compounded, and the robot walked
-# up an invisible staircase (~2 mm/step -> CoM z 0.854 -> 0.892 over 15 s of
-# straight walking, invisible to _report_drift because its CoM norm is xy-only).
+# Height of the ground plane the footstep planners place steps on.
 #
-# COUPLED TO sole_collision_boxes ABOVE: 0.0 is correct only because the box sole
-# puts the contact plane exactly on the sole frame. With the URDF's convex hull
-# (lowest vertex 16.5 mm BELOW the sole frame) a grounded foot measured +0.0165,
+# Coupled to sole_collision_boxes above: 0.0 is correct only because the box sole
+# puts the contact plane exactly on the sole frame. Under the URDF's convex hull,
+# whose lowest vertex is 16.5 mm below that frame, a grounded foot measures +0.0165
 # and 0.0 here would drive the feet into the floor. Change one, re-check the other.
 ground_z = 0.0                          # [m] sole-frame z of a foot flat on the floor
 
@@ -104,21 +96,19 @@ base_frame_name = "base_link"               # base link
 # Task weights
 w_com = 1e1             # weight of center of mass task
 w_am = 1e-4             # weight of angular momentum task
-w_foot = 5e0            # weight of the swing-foot motion task (walking needs real tracking)
+w_foot = 5e0            # weight of the swing-foot motion task
 w_hand = 1e-1           # weight of the hand motion task
-w_torso = 4             # weight torso orientation task (raised from 1 so the trunk
-                        # actively steers the heading through turns instead of lagging)
-torso_ori_only = True   # True: mask the torso task to ORIENTATION only (3 rows).
-                        # False: legacy 6D task -- the position rows are still in
-                        # the QP with zero gains, which commands ZERO LINEAR
-                        # ACCELERATION of the torso at weight w_torso and fights
-                        # the CoM task. False only to A/B against old results;
-                        # w_torso/kp_torso were tuned under the legacy behaviour.
-w_base = 0              # weight of the base (pelvis) yaw task. 0 = DISABLED
-                        # (A/B sim 2026-07-15: enabling (w=1, kp=12) made the 45deg
-                        # turn fall at t=5.5s vs t=17.7s without). If re-enabled,
-                        # MUST stay <= ~2: stiffer fights the gait's base-yaw
-                        # oscillation + AM task and destabilizes straight walking
+w_torso = 4             # weight of the torso orientation task; high enough that the
+                        # trunk steers the heading through turns instead of lagging
+torso_ori_only = True   # True: mask the torso task to orientation only (3 rows).
+                        # False: 6D task -- the position rows stay in the QP with zero
+                        # gains, commanding zero linear acceleration of the torso at
+                        # weight w_torso and fighting the CoM task. w_torso/kp_torso
+                        # are tuned for True.
+w_base = 0              # weight of the base (pelvis) yaw task; 0 disables it. If
+                        # re-enabled, must stay <= ~2: stiffer fights the gait's
+                        # base-yaw oscillation and the AM task, which destabilizes
+                        # straight walking
 w_feet_contact = 1e5    # weight of foot in contact (negative means infinite weight)
 w_hand_contact = 1e5    # weight for hand in contact
 w_posture = 1e-3        # weight of joint posture task
@@ -128,15 +118,14 @@ w_joint_bounds = 0.0    # weight of the velocity bounds: here no bounds
 
 # weights
 kp_contact = 10.0       # proportional gain of contact constraint
-kp_foot = 150.0         # proportional gain of swing-foot motion task (was 10: too soft to
-                        # place the foot within a step -> foot mistracks -> capture-point fall)
+kp_foot = 150.0         # proportional gain of swing-foot motion task; must be stiff
+                        # enough to place the foot within one step
 kp_hand = 10.0          # proportional gain of hand constraint
-kp_hand_rh = 10.0  
+kp_hand_rh = 10.0
 kp_hand_lh = 10.0
-kp_torso = 20.0         # proportional gain of torso task (raised from 10 to track the
-                        # commanded heading more tightly during turns)
-kp_base = 12.0          # proportional gain of the base (pelvis) yaw task (soft bias
-                        # so the pelvis shares the turn with the waist/torso)
+kp_torso = 20.0         # proportional gain of torso task
+kp_base = 12.0          # proportional gain of the base (pelvis) yaw task; a soft bias
+                        # so the pelvis shares the turn with the waist/torso
 kp_com = 10.0           # proportional gain of com task
 kp_am = 10.0            # proportional gain of angular momentum task
 

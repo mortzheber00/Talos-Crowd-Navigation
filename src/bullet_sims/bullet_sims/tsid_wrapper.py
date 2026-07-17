@@ -305,7 +305,6 @@ class TSIDWrapper:
         self.rightHandTask = tsid.TaskSE3Equality(
             "task-right-hand", self.robot, self.conf.rh_frame_name)
         
-        # Erstellt einen 6D-Vektor, bei dem alle Einträge den Wert aus der Config haben
         kp_vector = np.ones(6) * self.conf.kp_hand
         self.rightHandTask.setKp(kp_vector)
         self.rightHandTask.setKd(
@@ -325,15 +324,13 @@ class TSIDWrapper:
         torso_mask = np.array([0., 0., 0., 1., 1., 1.])
         self.torsoTask.setKp(self.conf.kp_torso * torso_mask)
         self.torsoTask.setKd(2.0 * np.sqrt(self.conf.kp_torso) * torso_mask)
-        # Zeroing Kp/Kd on the position rows does NOT remove them: without an
-        # explicit setMask the task stays 6D (verified: dim 6 vs 3), and those
-        # rows command a_des = a_ref + Kp*e + Kd*edot = 0, i.e. ZERO LINEAR
-        # ACCELERATION of the torso frame in the world at weight w_torso --
-        # fighting the CoM task on every step. Masking drops them to a pure
-        # orientation task. conf.torso_ori_only=False recovers the legacy 6D
-        # behaviour for A/B (NOTE kp_torso/w_torso were tuned WITH the spurious
-        # rows absorbing part of the weight, so masking makes orientation
-        # tracking effectively stiffer -> re-baseline after flipping this).
+        # Zeroing Kp/Kd on the position rows does not remove them: without an explicit
+        # setMask the task stays 6D, and those rows command
+        # a_des = a_ref + Kp*e + Kd*edot = 0 -- zero linear acceleration of the torso
+        # frame in the world, at weight w_torso, fighting the CoM task every step.
+        # Masking drops them to a pure orientation task. Note that flipping this off
+        # makes orientation tracking effectively softer, since the spurious rows
+        # absorb part of the weight; re-baseline kp_torso/w_torso if you do.
         if getattr(self.conf, 'torso_ori_only', True):
             self.torsoTask.setMask(torso_mask)
         formulation.addMotionTask(self.torsoTask, self.conf.w_torso, 1, 0.0)
@@ -348,13 +345,10 @@ class TSIDWrapper:
         self.base_id = self.model.getFrameId(conf.base_frame_name)
 
         '''
-        Optional: steer the base (pelvis) yaw along with the torso during
-        turns (yaw-only mask, soft). The idea: with only the torso steered, the
-        waist joint absorbs the heading and the hip-yaw joints take the whole
-        foot-vs-body twist. DISABLED by default (w_base = 0): A/B sim tests on
-        2026-07-15 (45 deg turn goal, blended gait) showed it makes the robot
-        fall EARLIER (t=5.5s vs t=17.7s without it). Enable via conf.w_base>0
-        to re-test; keep w_base <= ~2 or straight walking destabilizes.
+        Optional soft, yaw-only task steering the base (pelvis) along with the torso
+        through turns: with only the torso steered, the waist joint absorbs the
+        heading and the hip-yaw joints take the whole foot-vs-body twist. Enabled by
+        conf.w_base > 0, which see for the ceiling on that weight.
         '''
         self.baseTask = None
         self.base_ref = None

@@ -9,6 +9,9 @@ import numpy as np
 import pinocchio as pin
 
 import rclpy
+from rclpy.executors import SingleThreadedExecutor
+from geometry_msgs.msg import TwistStamped, PoseStamped
+from crowd_nav_interfaces.msg import Obstacle, ObstacleArray
 
 # simulator
 from simulator.mujoco_wrapper import MujocoWrapper as PybulletWrapper
@@ -26,7 +29,7 @@ from bullet_sims.reactive_footstep_planner import ReactiveFootStepPlanner
 from bullet_sims.floor_ambience import setup_floor_ambience
 
 # crowd
-from orca_nav.robot_orca import RobotORCA
+from orca_nav.orca_node import ORCAVelocityNode
 from orca_nav import debug_viz
 from orca_nav import scenarios
 from orca_nav.pedestrian import PedestrianSimulator
@@ -176,6 +179,28 @@ def _setup_lip_mpc(robot):
     c, _, _ = interpolator.comState()
     com_target = c.copy()
     return mpc, interpolator, com_start, com_target
+
+
+def _publish_obstacle_states(pub, node, states):
+    """Publish crowd states (list of (pos(2), vel(2), radius), i.e. what
+    ``PedestrianSimulator.states()`` returns) as an ObstacleArray. This is the
+    ground-truth counterpart of ``Talos.publish_obstacles()``; the ORCA node
+    picks one of the two topics."""
+    msg = ObstacleArray()
+    msg.header.stamp = node.get_clock().now().to_msg()
+    msg.header.frame_id = 'world'
+    for j, (p, v, r) in enumerate(states):
+        o = Obstacle()
+        o.name = f'ped_{j}'
+        o.id = j
+        o.x = float(p[0])
+        o.y = float(p[1])
+        o.radius = float(r)
+        o.vx = float(v[0])
+        o.vy = float(v[1])
+        o.stale = False
+        msg.obstacles.append(o)
+    pub.publish(msg)
 
 
 ################################################################################
@@ -749,7 +774,9 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                                                 # step transition, where the plan re-anchors
     mpc_phase = 0                               # MPC-sample index within the current step
     t_step_elapsed = 0.0                        # elapsed time within current step
-    t_publish = 0.0                             # last ros publish time
+    t_publish = -np.inf                         # last ros publish time (-inf: publish
+                                                # during pre-walk too, so odom/obstacles/
+                                                # cmd_vel already flow at the first step)
     u_k = np.zeros(2)                           # held mpc control (commanded zmp)
     swing_trajectory = None                     # current swing-foot spline
     next_step = None                            # current swing-target footstep (for viz)
@@ -785,10 +812,6 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     torso_yaw_prev = 0.0
     torso_yaw_rate = 0.0                        # raw d(torso_yaw)/dt (diagnostic)
 
-    # ORCA velocity generator: v_cmd toward the goal, avoiding pedestrians
-    robot_ctrl = RobotORCA(ROBOT_GOAL, radius=0.35, max_speed=1.5,
-                           desired_speed=1.2, safety_margin=0.2)
-
     # reactive footstep planner: places each next footstep in the direction of
     # v_cmd and feeds the MPC
     reactive_planner = ReactiveFootStepPlanner(
@@ -808,6 +831,47 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
 
     _install_sigint_handler()
 
+    # --- ROS wiring: obstacles, cmd_vel and the goal flow over topics ---------
+    # The ORCA layer is a separate ROS node: it subscribes to odom + an
+    # obstacle topic and publishes cmd_vel; this loop only consumes the cached
+    # latest message. Ground-truth crowd states are published from here,
+    # perceived ones by Talos.publish_obstacles() -- the sensor/ground-truth
+    # switch is just a topic name (a remap, once nodes run as processes).
+    node = robot._node
+    obstacle_topic = ('obstacles/perceived' if PEDESTRIAN_SENSOR_DATA
+                      else 'obstacles/ground_truth')
+    orca_node = ORCAVelocityNode(goal=ROBOT_GOAL, obstacle_topic=obstacle_topic,
+                                 radius=0.35, max_speed=1.5,
+                                 desired_speed=1.2, safety_margin=0.2)
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    executor.add_node(orca_node)
+
+    gt_obstacle_pub = node.create_publisher(
+        ObstacleArray, 'obstacles/ground_truth', 10)
+
+    # latest values received over topics (updated in the callbacks below)
+    nav = SimpleNamespace(v_cmd=np.zeros(2), v_pref=np.zeros(2),
+                          goal=np.asarray(ROBOT_GOAL, dtype=float))
+
+    def _cmd_vel_cb(msg):
+        nav.v_cmd = np.array([msg.twist.linear.x, msg.twist.linear.y])
+
+    def _v_pref_cb(msg):
+        nav.v_pref = np.array([msg.twist.linear.x, msg.twist.linear.y])
+
+    def _goal_cb(msg):
+        # new goal (e.g. RViz "2D Goal Pose"): retarget the footstep planner;
+        # the ORCA node updates its own goal via its own subscription
+        nav.goal = np.array([msg.pose.position.x, msg.pose.position.y])
+        reactive_planner.goal = nav.goal.copy()
+        L.GOAL = nav.goal.copy()
+        print(f"[nav] new goal from goal_pose: ({nav.goal[0]:+.2f}, {nav.goal[1]:+.2f})")
+
+    node.create_subscription(TwistStamped, 'cmd_vel', _cmd_vel_cb, 10)
+    node.create_subscription(TwistStamped, 'cmd_vel_pref', _v_pref_cb, 10)
+    node.create_subscription(PoseStamped, 'goal_pose', _goal_cb, 10)
+
     for i in range(-N_pre, N_sim):
         if _ABORT:
             print(f"aborted at t={i * conf.dt:.2f} s "
@@ -816,22 +880,28 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         t = i * conf.dt
         dt = conf.dt
 
-        # --- robot state + crowd + ORCA velocity command (first, so the reactive
-        #     planner can use the latest v_cmd) ---
+        # --- robot state + crowd (first, so the reactive planner can use the
+        #     latest v_cmd) ---
         body_id = robot.robot.id()
         com = simulator.computeComPosition(body_id)
         vcom = simulator.computeComVelocity(body_id)
         # move the crowd (pedestrians avoid the robot via ground truth either way)
         crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
-        # what the robot knows about the pedestrians: onboard depth camera (only what
-        # it can see) or ground truth
+
+        # process pending ROS callbacks: the ORCA node consumes odom +
+        # obstacles and publishes cmd_vel; our cached nav.* values update here
+        executor.spin_once(timeout_sec=0.0)
+        v_cmd = nav.v_cmd
+        v_pref = nav.v_pref
+
+        # pedestrian states, for LOGGING only (the ORCA node receives the same
+        # data over its obstacle topic): same source switch as that topic --
+        # onboard depth camera estimates vs simulation ground truth
         if PEDESTRIAN_SENSOR_DATA:
             ped_states = [(np.array([o['x'], o['y']]), np.array([o['vx'], o['vy']]), o['r'])
                           for o in robot.obstacles2d()]
         else:
             ped_states = crowd.states()   # list of (pos(2), vel(2), radius)
-        v_cmd = robot_ctrl.compute_velocity(com[:2], vcom[:2], ped_states)
-        v_pref = robot_ctrl.preferred_velocity(com[:2])
         # Accumulate for the per-step average. ORCA sees the CoM's gait-frequency
         # lateral sway (+/-0.3 m/s), so v_cmd oscillates at the step frequency and
         # sampling it once per step at the transition aliases that oscillation.
@@ -859,7 +929,7 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             debug_viz.velocity_arrow(com[:2], v_cmd, z=float(com[2]),
                                      scale=ARROW_SCALE, rgba=(0.1, 0.9, 0.1, 1.0)),
         ) if a is not None]
-        goal_marker = debug_viz.point_marker(ROBOT_GOAL, z=0.15, radius=0.12,
+        goal_marker = debug_viz.point_marker(nav.goal, z=0.15, radius=0.12,
                                              rgba=(1.0, 0.2, 0.2, 1.0))
         # orange foot-shaped box at the next planned footstep, fading blue/red
         # boxes at the executed footstep history, violet spheres for the CoM
@@ -1040,15 +1110,17 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         #     so the depth/segmentation render sees the updated scene) ---
         if PEDESTRIAN_SENSOR_DATA and i % max(1, int(round((1.0 / 30.0) / conf.dt))) == 0:
             robot.update_obstacles()
+            robot.publish_obstacles()
 
         # --- navigation diagnostic (once per second while walking) ---
         if i >= 0 and i % int(round(1.0 / conf.dt)) == 0:
-            dist_goal = float(np.hypot(*(np.asarray(ROBOT_GOAL, float) - com[:2])))
+            dist_goal = float(np.hypot(*(nav.goal - com[:2])))
             print(f"[nav] t={t:5.1f}s  com=({com[0]:5.2f},{com[1]:5.2f})  "
                   f"dist_goal={dist_goal:4.2f}  |v_cmd|={np.hypot(*v_cmd):4.2f}  "
                   f"v_cmd=({v_cmd[0]:+.2f},{v_cmd[1]:+.2f})")
 
-        # publish to ros at ~30 Hz
+        # publish to ros at ~30 Hz: robot state + ground-truth crowd. The odom
+        # message drives the ORCA node, so cmd_vel arrives at this rate too.
         if t - t_publish > 1. / 30.:
             t_publish = t
             robot.publish()
@@ -1061,6 +1133,7 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                 robot.publish_obstacle_markers(
                     {p.name: dict(x=p.position[0], y=p.position[1], r=p.radius)
                      for p in crowd.peds})
+            _publish_obstacle_states(gt_obstacle_pub, node, crowd.states())
 
         # store for the post-run plots
         if i >= 0:
@@ -1070,6 +1143,8 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                          yaw_sup0=yaw_sup0, torso_yaw_rate=torso_yaw_rate,
                          T_cmd=T_cmd)
 
+    executor.remove_node(orca_node)
+    orca_node.destroy_node()
     return L
 
 

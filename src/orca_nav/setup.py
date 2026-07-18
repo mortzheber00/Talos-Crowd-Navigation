@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'crowd_demo = orca_nav.crowd_demo:main',
+            'orca_planner = orca_nav.orca_node:main',
         ],
     },
 )

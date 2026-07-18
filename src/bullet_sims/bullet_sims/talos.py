@@ -21,6 +21,7 @@ from geometry_msgs.msg import WrenchStamped, TransformStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from sensor_msgs.msg import JointState, Image, CameraInfo
 from std_msgs.msg import Header
+from crowd_nav_interfaces.msg import Obstacle, ObstacleArray
 
 class Talos:
     """Talos robot
@@ -205,6 +206,10 @@ class Talos:
         self._wrench_lf_pub = self._node.create_publisher(WrenchStamped, 'wrench_lf', 10)
         # obstacle-estimate overlay for RViz (used by publish_obstacle_markers)
         self.marker_pub = self._node.create_publisher(MarkerArray, 'obstacle_markers', 10)
+        # obstacle estimates as DATA for downstream planners (ORCA); the marker
+        # topic above is only a visualization of the same estimates
+        self.obstacle_pub = self._node.create_publisher(
+            ObstacleArray, 'obstacles/perceived', 10)
            
     def update(self):
         """updates the robot
@@ -631,6 +636,28 @@ class Talos:
                 stale=False, t=t_now)
 
         return self._obstacles
+
+    def publish_obstacles(self):
+        """Publish the current depth-camera obstacle estimates (the state kept
+        by update_obstacles()) as an ObstacleArray on ``obstacles/perceived``.
+        Call after update_obstacles(); planners subscribe to this instead of
+        polling obstacles2d()."""
+        msg = ObstacleArray()
+        msg.header.stamp = getattr(self, '_last_pub_stamp', None) \
+            or self._node.get_clock().now().to_msg()
+        msg.header.frame_id = 'world'
+        for name, obs in sorted(self._obstacles.items()):
+            o = Obstacle()
+            o.name = name
+            o.id = int(obs['id'])
+            o.x = float(obs['x'])
+            o.y = float(obs['y'])
+            o.radius = float(obs['r'])
+            o.vx = float(obs['vx'])
+            o.vy = float(obs['vy'])
+            o.stale = bool(obs['stale'])
+            msg.obstacles.append(o)
+        self.obstacle_pub.publish(msg)
 
     def publish_obstacle_markers(self, ground_truth=None):
         """RViz overlay of the obstacle estimates: cyan cylinders at the

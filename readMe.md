@@ -100,7 +100,7 @@ or rebuilding (defaults are the constants at the top of `walking.py`):
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `scenario` | string | `random` | Crowd scenario: `head_on`, `crossing`, `circle`, `corridor`, `random`. |
-| `pedestrian_sensor_data` | bool | `false` | `false` = the robot uses ground-truth pedestrian states; `true` = it uses only what its onboard depth camera perceives (`obstacles2d()`). |
+| `pedestrian_sensor_data` | bool | `true` | `false` = the robot uses ground-truth pedestrian states; `true` = it uses only what its onboard depth camera perceives (`obstacles2d()`). |
 
 Override them with `--ros-args -p name:=value`:
 
@@ -115,6 +115,100 @@ ros2 run bullet_sims walking --ros-args -p scenario:=head_on -p pedestrian_senso
 The chosen values are printed at startup. Note: `pedestrian_sensor_data:=true`
 requires the depth+segmentation perception path (the camera-based `update_obstacles()`);
 with `false` the camera is not used at all.
+
+### ROS communication architecture (topics)
+
+The navigation components communicate over ROS 2 topics rather than direct
+function calls, even though everything currently runs in a single process
+(`walking.py` spins a `SingleThreadedExecutor` over two nodes once per sim
+tick). Only the 300 Hz whole-body control chain (MPC → interpolator → TSID)
+stays as direct calls — topics inside that loop would add latency for no
+benefit. Because the boundaries are topics, every intermediate signal can be
+watched, recorded (`ros2 bag`) or replaced from outside, and any component
+could later be moved into its own process with a remap instead of a code
+change.
+
+**The nodes and the data flow:**
+
+```
+                         talos robot node                    orca_planner
+                         ────────────────                    ────────────
+sim ground truth ──────► /obstacles/ground_truth ──┐
+depth-camera tracker ──► /obstacles/perceived ─────┤ (one of the two,
+                                                   │  see listening modes)
+robot base state ──────► /odom ────────────────────┴──► ORCA solver
+                                                            │
+    footstep planner ◄── /cmd_vel ◄─────────────────────────┤
+    (in walking.py)      /cmd_vel_pref ◄────────────────────┘
+           ▲
+RViz / CLI ┴───────────► /goal_pose ──► (both: ORCA goal + footstep goal)
+```
+
+The ORCA node (`src/orca_nav/orca_nav/orca_node.py`) recomputes and publishes
+`cmd_vel` on every incoming `odom` message (~30 Hz — plenty, since the
+reactive footstep planner only samples the command once per ~0.8 s step, as
+an average over the step). It also runs standalone:
+`ros2 run orca_nav orca_planner` with `-p goal_x/goal_y/obstacle_topic/...`.
+
+**Listening modes (which obstacle data drives the robot):** the
+`pedestrian_sensor_data` parameter picks which topic the ORCA node subscribes
+to — it is a topic selection, not a different code path:
+
+| Mode | Launch | ORCA subscribes to | Meaning |
+|---|---|---|---|
+| Perception (default) | `-p pedestrian_sensor_data:=true` | `/obstacles/perceived` | The robot reacts only to pedestrians its onboard depth camera currently sees (occluded ones are held briefly, then dropped). |
+| Ground truth | `-p pedestrian_sensor_data:=false` | `/obstacles/ground_truth` | The robot reacts to the simulator's exact pedestrian states — an upper bound / debugging reference. |
+
+`/obstacles/ground_truth` is published in both modes (for comparison and
+logging); `/obstacles/perceived` only carries data when perception is on.
+
+**All topics:**
+
+| Topic | Type | Content |
+|---|---|---|
+| `/cmd_vel` | geometry_msgs/TwistStamped | ORCA avoidance velocity — drives the footsteps. |
+| `/cmd_vel_pref` | geometry_msgs/TwistStamped | ORCA preferred (goal-seeking) velocity; difference to `/cmd_vel` = the crowd's influence. |
+| `/obstacles/ground_truth` | crowd_nav_interfaces/ObstacleArray | True pedestrian states (x, y, radius, vx, vy) from the crowd sim. |
+| `/obstacles/perceived` | crowd_nav_interfaces/ObstacleArray | Depth-camera tracker estimates, incl. a `stale` flag for briefly-occluded tracks. |
+| `/odom` | nav_msgs/Odometry | base_link pose; **twist is world-frame** (project convention, ORCA consumes it directly). |
+| `/goal_pose` | geometry_msgs/PoseStamped | Input: retargets ORCA *and* the footstep planner mid-run (works with RViz "2D Goal Pose"). |
+| `/joint_states`, `/tf` | — | Robot state for RViz. |
+| `/wrench_rf`, `/wrench_lf` | geometry_msgs/WrenchStamped | Foot force/torque readings. |
+| `/camera/depth/image_rect`, `/camera/depth/camera_info` | sensor_msgs | Head-camera depth stream (feeds `depth_image_proc`). |
+| `/zmp`, `/obstacle_markers` | visualization_msgs/MarkerArray | Visualization only (markers mirror `/obstacles/perceived`). |
+
+**Watching from a second terminal:**
+
+```bash
+cd <workspace root>
+source install/setup.bash     # REQUIRED for the ObstacleArray topics: the
+                              # custom message type lives in this workspace
+ros2 topic list
+ros2 topic echo /cmd_vel
+ros2 topic echo /obstacles/perceived
+ros2 topic hz /cmd_vel
+ros2 node info /orca_planner  # full sub/pub wiring of the ORCA node
+```
+
+Gotchas:
+
+- Without `source install/setup.bash`, echoing an obstacle topic fails with
+  *"The message type 'crowd_nav_interfaces/msg/ObstacleArray' is invalid"*.
+  If it still fails after sourcing, run `ros2 daemon stop` once (stale type
+  cache).
+- Topics are silent while the MuJoCo model compiles at startup, and with the
+  viewer on the sim runs ~10x slower than realtime — expect "30 Hz" topics
+  to tick at ~3 Hz of wall time.
+
+**Retargeting the goal mid-run:**
+
+```bash
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+  "{pose: {position: {x: -2.0, y: 1.0}}}"
+```
+
+Both the ORCA node and the reactive footstep planner pick the new goal up
+immediately (the run prints `[nav] new goal from goal_pose: ...`).
 
 ## Group members final project:
 Lara Heidtmann , Florian Bohnes, Sebastián Serna, Moritz Heber, Nicolas Guenther

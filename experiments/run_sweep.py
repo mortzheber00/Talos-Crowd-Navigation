@@ -186,6 +186,36 @@ def qa_solo():
     return runs
 
 
+def qg2_ped_responsibility():
+    """Q-G2: how much crowd cooperation does the robot minimally need?
+
+    Q-G showed the two endpoints -- a crowd that fully yields (100% success) and
+    a crowd blind to the robot (0%). This fills the middle: the robot stays
+    visible to the pedestrians, but each pedestrian takes a smaller share of the
+    avoidance (``ped_responsibility`` from 0.5 down to 0.0). It is the dose-
+    response curve between Q-G's extremes.
+
+    Confound to state honestly: ped_responsibility applies to every neighbour a
+    pedestrian has, so lowering it also makes the pedestrians less willing to
+    avoid *each other*, not only the robot. The reading is therefore "a less
+    accommodating crowd overall", not a clean robot-only isolation. The clean
+    version needs a per-neighbour responsibility (a code change), and is only
+    worth it if this curve is interesting.
+
+    Note the default sums oddly: robot 0.2 + ped 0.3 = 0.5, where reciprocal ORCA
+    would put the pair's shares near 1.0. The crowd is over-compensating for a
+    robot that under-commits, and this sweep makes that visible.
+    """
+    runs = []
+    for pr in (0.0, 0.1, 0.2, 0.3, 0.5):
+        for scen, n in (("head_on", 2), ("crossing", 4), ("random", 8)):
+            for seed in SEEDS:
+                runs.append(_base(scenario=scen, n_peds=n, seed=seed,
+                                  ped_responsibility=pr,
+                                  run_id=f"qg2_p{pr}_{scen}{n}_s{seed}"))
+    return runs
+
+
 def qg_cooperation():
     """Q-G: is the robot avoiding the crowd, or is the crowd avoiding the robot?
 
@@ -219,6 +249,7 @@ EXPERIMENTS = {
     "qa_solo": qa_solo,
     "qb2_speed": qb2_speed,
     "qg_cooperation": qg_cooperation,
+    "qg2_ped_responsibility": qg2_ped_responsibility,
     "qc_scenarios": qc_scenarios,
     "qd_responsibility": qd_responsibility,
     "qe_density": qe_density,

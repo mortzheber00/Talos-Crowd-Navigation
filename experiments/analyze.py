@@ -836,8 +836,77 @@ def qg():
         print(f"  (wilcoxon skipped: {e})")
 
 
+def qg2():
+    """Q-G2: the dose-response between Q-G's cooperative and blind extremes."""
+    df = _load("qg2_ped_responsibility")
+    if df is None:
+        return
+    prs = sorted(df["ped_responsibility"].unique())
+    scens = ["head_on", "crossing", "random"]
+    scen_c = {"head_on": C[0], "crossing": C[1], "random": C[3]}
+
+    fig, axs = plt.subplots(1, 3, figsize=(15, 4.4))
+
+    # collision-free success vs how much the crowd yields, one line per scenario
+    ax = axs[0]
+    for s in scens:
+        sub = df[df.scenario == s]
+        ys, lo, hi = [], [], []
+        for pr in prs:
+            p, a, b = _rate(sub[sub.ped_responsibility == pr]["success_collision_free"])
+            ys.append(p); lo.append(a); hi.append(b)
+        ax.plot(prs, ys, "-o", color=scen_c[s], lw=2, ms=7, label=s)
+        ax.fill_between(prs, lo, hi, color=scen_c[s], alpha=0.12)
+    ax.set_ylim(-0.05, 1.1)
+    ax.set_yticks([0, 0.5, 1.0]); ax.set_yticklabels(["0", "50%", "100%"])
+    ax.set_xlabel("pedestrian responsibility  (crowd yields more →)")
+    ax.set_ylabel("collision-free success")
+    ax.set_title("How much crowd cooperation the robot needs", loc="left")
+    ax.grid(True); ax.legend(fontsize=9, loc="lower right")
+    # anchor the two Q-G endpoints in words
+    ax.text(0.0, 1.03, "shipped default = 0.3", fontsize=8.5, color=INK2)
+
+    # clearance vs yield
+    ax = axs[1]
+    for s in scens:
+        sub = df[df.scenario == s].groupby("ped_responsibility")["min_sep_m"]
+        ax.plot(prs, [sub.median().get(pr, np.nan) for pr in prs], "-o",
+                color=scen_c[s], lw=2, ms=7, label=s)
+    ax.axhline(0, color=BAD, ls="--", lw=1.2)
+    ax.text(prs[-1], 0.01, "contact", ha="right", va="bottom", fontsize=9, color=BAD)
+    ax.set_xlabel("pedestrian responsibility")
+    ax.set_ylabel("min. clearance [m]  (median)")
+    ax.set_title("Safety vs crowd cooperation", loc="left")
+    ax.grid(True); ax.legend(fontsize=9)
+
+    # detour vs yield: the robot's own effort
+    ax = axs[2]
+    for s in scens:
+        sub = df[df.scenario == s].groupby("ped_responsibility")["path_ratio"]
+        ax.plot(prs, [sub.median().get(pr, np.nan) for pr in prs], "-o",
+                color=scen_c[s], lw=2, ms=7, label=s)
+    ax.axhline(1.0, color=INK2, ls="--", lw=1.2)
+    ax.set_xlabel("pedestrian responsibility")
+    ax.set_ylabel("path length / straight line  (median)")
+    ax.set_title("The robot's detour", loc="left")
+    ax.grid(True); ax.legend(fontsize=9)
+
+    fig.suptitle("Q-G2  The dose-response between a cooperative crowd and a blind "
+                 "one", x=0.02, ha="left", fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    _save(fig, "qg2_ped_responsibility")
+
+    t = df.groupby(["ped_responsibility", "scenario"]).agg(
+        n=("success", "size"), collision_free=("success_collision_free", "mean"),
+        fell=("fell", "mean"), collided=("collided", "mean"),
+        min_sep=("min_sep_m", "median"), t_goal=("t_goal_s", "median"),
+        path_ratio=("path_ratio", "median")).round(3)
+    t.to_csv(os.path.join(RESULTS, "table_qg2_ped_responsibility.csv"))
+    print(t.to_string())
+
+
 ALL = dict(qa=qa, qb=qb, qb2=qb2, qc=qc, qc_traj=qc_traj, qd=qd, qe=qe, qf=qf,
-           qg=qg)
+           qg=qg, qg2=qg2)
 
 
 def main():

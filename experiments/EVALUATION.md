@@ -256,22 +256,48 @@ thing doing the avoiding.
 
 ### Q-E — Density limit  → `figures/qe_density.png`
 
-`n_peds` ∈ {0, 2, 4, 8, 12, 16, 24} in the random scenario.
+`n_peds` ∈ {0, 2, 4, 8, 12, 16, 24} in the random scenario, 10 seeds each.
 
-`[TBD table_qe_density.csv]`
+| pedestrians | collision-free | falls | clearance [m] | t_goal [s] | path ratio |
+|---|---|---|---|---|---|
+| 0 | 100 % | 0 | – | 8.95 | 0.97 |
+| 2 | 100 % | 0 | 0.349 | 9.33 | 0.99 |
+| 4 | 100 % | 0 | 0.349 | 9.73 | 1.00 |
+| 8 | 100 % | 0 | 0.348 | 10.12 | 1.05 |
+| 12 | 100 % | 0 | 0.347 | 10.66 | 1.04 |
+| 16 | 100 % | 0 | 0.348 | 10.88 | 1.05 |
+| 24 | 100 % | 0 | 0.348 | 11.64 | 1.09 |
+
+**There is no breaking point in the tested range.** Tripling the crowd from 8 to
+24 costs 1.5 s and 4 % of path length; clearance and collision-free rate do not
+budge. The slide title "where it breaks" has no answer, and that non-answer is
+informative: a planner that genuinely had to solve a denser problem would show
+*something* — longer detours, closer calls, occasional failures. Nothing degrades
+because, as Q-G establishes, the robot is not the one solving it.
 
 ### Q-F — Cost of perception  → `figures/qf_perception.png`
 
 Ground truth vs onboard depth camera, paired by (scenario, seed).
 
-**Perception does not lose pedestrians. It inflates them.**
+**Perception does not lose pedestrians. It inflates them.** (60 runs, 30 pairs)
 
-| condition | peds | reach goal | true clearance [m] | perceived radius, median | peak |
+| scenario | mode | collision-free | t_goal [s] | clearance [m] | tracks |
 |---|---|---|---|---|---|
-| ground truth, head_on | 2 | 10/10 | 0.348 | 0.30 (exact) | 0.30 |
-| ground truth, crossing | 4 | 10/10 | 0.349 | 0.30 (exact) | 0.30 |
-| depth camera, head_on | 2 | 8/10 | 0.349 | **3.14 m** | 8.38 m |
-| depth camera, crossing | 4 | **0/5** | 0.350 | **4.27 m** | 9.45 m |
+| head_on | ground truth | 100 % | 9.10 | 0.348 | 2.0 / 2 |
+| head_on | depth camera | 80 % | 39.38 | 0.349 | 2.0 / 2 |
+| crossing | ground truth | 100 % | 10.42 | 0.349 | 4.0 / 4 |
+| crossing | depth camera | **10 %** | 35.82 | 0.349 | 4.0 / 4 |
+| random | ground truth | 100 % | 10.12 | 0.348 | 8.0 / 8 |
+| random | depth camera | **10 %** | 30.29 | 0.348 | 8.0 / 8 |
+
+Perceived radius against a true 0.30 m: **3.14 m median / 8.38 m peak** in
+head_on, **4.27 m / 9.45 m** in crossing — 10–30× too large, and worse with
+density.
+
+Two numbers carry the result. Collision-free success collapses from 100 % to
+10 % and time-to-goal roughly quadruples. Clearance does not move at all:
+**Wilcoxon signed-rank over the 30 pairs gives p = 0.76** — no detectable
+difference. Perception costs the robot its *goal*, never its *safety*.
 
 Track *count* is correct throughout (2.0/2, 4.0/4, 12.0/12) — the camera sees
 everybody. What is wrong is the radius: a true 0.30 m pedestrian is carried as a

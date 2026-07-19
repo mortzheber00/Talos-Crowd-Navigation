@@ -393,39 +393,71 @@ Each of those was individually puzzling. One fact explains all four.
 
 ---
 
-## 4. Slide plan (≈12 slides)
+## 4. The story in one paragraph
+
+The system meets every success criterion it was given: 100 % collision-free
+navigation across six scenarios and every crowd density up to 24 pedestrians,
+with planning far inside real time. It meets them because the pedestrians avoid
+the robot. Remove the crowd's cooperation and the collision-free rate goes to
+0 % (p = 3.6 × 10⁻¹²) — not because the robot's ORCA layer is idle (it detours
+up to 2.1× further) but because it is out-run: it walks at 0.4 m/s and executes
+each command two steps (1.57 s) late, while pedestrians close at 1.3 m/s. That
+one fact explains four otherwise puzzling results: why clearance is pinned at
+0.348 m under every parameter setting, why crowd density never degrades
+anything, why breaking perception costs the goal but provably not safety
+(p = 0.76), and why the safety margin is inert.
+
+## 5. What we would change
+
+1. **The bridge is too slow for the crowd's speed.** Either slow the crowd to a
+   speed the walker can respond to, or shorten the reaction path — react at the
+   MPC rate rather than once per 0.8 s step, and shrink the one-step commitment.
+   This is the real research problem the project uncovered.
+2. **Set `desired_speed ≈ 0.6 m/s`** (Q-B2). Free, and makes the velocity command
+   mean something.
+3. **Bound the perceived radius** (Q-F). One clamp turns a 10–30× over-estimate
+   into a working perception path.
+4. **Give pedestrians contact** (`contact=True`) so a collision has a physical
+   consequence and the balance controller is actually tested by one.
+
+## 6. Slide plan (≈13 slides)
 
 | # | Slide | Content |
 |---|---|---|
 | 1 | Title | Talos crowd navigation, team, one screenshot |
 | 2 | The problem | ORCA is holonomic + instantaneous; a biped is neither. One diagram. |
 | 3 | System | The 3-layer architecture figure (`figures/system_architecture.pdf`) + topic table |
-| 4 | What we asked | The six questions as one table — this is the "we had a method" slide |
-| 5 | Method | Headless sweep, N seeds, metric definitions, the two measurement decisions |
-| 6 | **Q-C** Does it work | Success/clearance/detour per scenario + trajectory small multiples |
-| 7 | **Q-A** Real-time | The budget bar chart. Punchline: ORCA is free, WBC and perception are not |
-| 8 | **Q-B** The bridge | Commanded vs achieved speed. Punchline: the specification mismatch |
-| 9 | **Q-B2** The fix | Speed sweep — did matching the setpoint help? |
-| 10 | **Q-D** Who yields | The trade-off plot |
-| 11 | **Q-G** Whose avoidance? | Cooperative vs blind crowd — the honesty slide |
-| 12 | **Q-E/F** Limits | Density breaking point + perception ablation |
-| 13 | Conclusions | What we would change; honest limitations |
+| 4 | What we asked | The seven questions as one table — the "we had a method" slide |
+| 5 | Method | Headless sweep, 470 runs, 10 seeds, metric definitions, the two measurement decisions |
+| 6 | **Q-C** Does it work | `qc_scenarios` + `qc_trajectories` — all criteria met, 100 % |
+| 7 | **Q-A** Real-time | `qa_timing_budget` — ORCA is 2 % of its budget; WBC and perception are the cost |
+| 8 | **Q-B** The bridge | `qb_command_tracking` — 0.50 speed gain, 2-step lag |
+| 9 | **Q-B2** The fix | `qb2_speed_matching` — achieved speed saturates at 0.40 m/s |
+| 10 | **Q-D/Q-E** The puzzle | `qd_responsibility` + `qe_density` — nothing we tune changes clearance, no density limit |
+| 11 | **Q-G** The answer | `qg_cooperation` — 100 % → 0 %. The slide the talk is built around. |
+| 12 | **Q-F** Perception | `qf_perception` — success collapses, clearance provably unchanged |
+| 13 | Conclusions | Section 5 + honest limitations |
 
-Slide 11 is the one that makes this a study. Presenting a 100 % success rate and
-then showing the experiment that tries to break your own result is worth more
-than any additional scenario.
+Structure the talk so slides 6–10 build the puzzle and slide 11 resolves it.
+Presenting a 100 % success rate and then showing the experiment that breaks your
+own result is worth more than any additional scenario — and it is the difference
+between a demo and an evaluation.
 
 ### Honest limitations to state on slide 13
 
 - Pedestrians are **ghosts** (`contact=False`) — a collision is measured
-  geometrically, never physically. The robot is never destabilised by an
-  impact, so collision counts are a planning metric, not a safety-of-contact
-  one.
+  geometrically, never physically. In the Q-G blind runs the robot passes
+  *through* people without ever losing balance. Collision counts are a planning
+  metric, not a safety-of-contact one, and the blind condition would look worse
+  still with contact enabled.
 - In the default configuration pedestrians avoid the robot **reciprocally using
   ground truth**, even when the robot itself only has camera data — a crowd both
-  more cooperative and better informed than a real one. Q-G quantifies exactly
-  how much that flatters the results.
+  more cooperative and better informed than any real one. Q-G quantifies exactly
+  how much that flatters the results: all of it.
 - The crowd model is kinematic disks, not gait-driven humans.
 - One robot, one goal, one map; no static obstacles.
-- Wall-clock timings are from a shared 13-core dev container running 10 sims
-  concurrently, so they are an upper bound on a dedicated machine.
+- The Q-G blind condition is the opposite extreme: real pedestrians do look
+  where they are going. The truth is between the two, and the project has only
+  measured the endpoints.
+- Timings come from `qa_solo`, run one at a time on an idle machine. The sweep's
+  own timings (10 concurrent sims) are ~2× inflated and are not quoted.

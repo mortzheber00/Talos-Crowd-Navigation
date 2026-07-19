@@ -659,7 +659,9 @@ def qf():
     ax.set_yticks([0, 0.5, 1.0]); ax.set_yticklabels(["0", "50%", "100%"])
     ax.set_ylabel("collision-free success")
     ax.set_title("Outcome", loc="left")
-    ax.grid(axis="y", zorder=0); ax.legend(fontsize=9)
+    ax.grid(axis="y", zorder=0)
+    # above the plot: the ground-truth bars reach 100%, leaving no free corner
+    ax.legend(fontsize=9, ncol=2, loc="lower center", bbox_to_anchor=(0.5, 1.06))
 
     # paired clearance: each line is one (scenario, seed) pair
     ax = axs[1]
@@ -682,24 +684,34 @@ def qf():
                  f"{d.median():+.3f} m over {len(piv)} pairs", loc="left")
     ax.grid(axis="y")
 
-    # how much of the crowd the robot actually had
+    # Why it fails. The camera tracks the whole crowd (100% of pedestrians in
+    # every scenario), so the interesting quantity is not how many it sees but
+    # how big it thinks they are: the radius estimator has no upper bound and
+    # ratchets a 0.30 m pedestrian up to several metres.
     ax = axs[2]
     sel = df[df["mode"] == "depth camera"]
-    if len(sel):
-        for k, s in enumerate(scens):
-            v = sel[sel.scenario == s]["mean_n_tracks"] / \
-                sel[sel.scenario == s]["n_peds_true"].replace(0, np.nan)
-            if v.notna().any():
-                ax.bar(k, v.median(), width=0.6, color=C[3], zorder=2)
-                ax.text(k, v.median() + 0.02, f"{100 * v.median():.0f}%",
-                        ha="center", fontsize=9, color=INK)
-        ax.axhline(1.0, color=INK2, ls="--", lw=1.2)
-        ax.text(len(scens) - 0.4, 1.02, "whole crowd", ha="right",
+    if len(sel) and "perc_rmed_m" in sel:
+        x = np.arange(len(scens))
+        med = [sel[sel.scenario == s]["perc_rmed_m"].median() for s in scens]
+        mx = [sel[sel.scenario == s]["perc_rmax_m"].median() for s in scens]
+        ax.bar(x - 0.19, med, width=0.34, color=C[3], zorder=2,
+               label="typical (median over run)")
+        ax.bar(x + 0.19, mx, width=0.34, color=C[5], zorder=2,
+               label="worst in run")
+        for xi, v in zip(x - 0.19, med):
+            if np.isfinite(v):
+                ax.text(xi, v + 0.2, f"{v:.1f}", ha="center", fontsize=9, color=INK)
+        for xi, v in zip(x + 0.19, mx):
+            if np.isfinite(v):
+                ax.text(xi, v + 0.2, f"{v:.1f}", ha="center", fontsize=9, color=INK)
+        ax.axhline(0.3, color=INK2, ls="--", lw=1.4)
+        ax.text(-0.45, 0.45, "true pedestrian radius 0.30 m", ha="left",
                 fontsize=9, color=INK2)
     ax.set_xticks(range(len(scens))); ax.set_xticklabels(scens)
-    ax.set_ylabel("tracked / true pedestrians")
-    ax.set_title("What the camera actually saw", loc="left")
+    ax.set_ylabel("perceived radius [m]")
+    ax.set_title("Why: it sees everyone, 10–30× too big", loc="left")
     ax.grid(axis="y", zorder=0)
+    ax.legend(fontsize=9, loc="upper left")
 
     fig.suptitle("Q-F  What replacing ground truth with the onboard depth camera costs",
                  x=0.02, ha="left", fontweight="bold")
@@ -765,7 +777,11 @@ def qg():
     ax.set_yticks([0, 0.5, 1.0]); ax.set_yticklabels(["0", "50%", "100%"])
     ax.set_ylabel("collision-free success")
     ax.set_title("Outcome", loc="left")
-    ax.grid(axis="y", zorder=0); ax.legend(fontsize=9)
+    ax.grid(axis="y", zorder=0)
+    # above the plot: the cooperative bars run to 100%, so every in-axes corner
+    # is occupied and a legend inside would sit on the data
+    ax.legend(fontsize=9, ncol=2, loc="lower center",
+              bbox_to_anchor=(0.5, 1.06))
 
     ax = axs[1]
     piv = df.pivot_table(index=["scenario", "n_peds", "seed"], columns="crowd",

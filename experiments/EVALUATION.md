@@ -264,7 +264,50 @@ thing doing the avoiding.
 
 Ground truth vs onboard depth camera, paired by (scenario, seed).
 
-`[TBD table_qf_perception.csv]`
+**Perception does not lose pedestrians. It inflates them.**
+
+| condition | peds | reach goal | true clearance [m] | perceived radius, median | peak |
+|---|---|---|---|---|---|
+| ground truth, head_on | 2 | 10/10 | 0.348 | 0.30 (exact) | 0.30 |
+| ground truth, crossing | 4 | 10/10 | 0.349 | 0.30 (exact) | 0.30 |
+| depth camera, head_on | 2 | 8/10 | 0.349 | **3.14 m** | 8.38 m |
+| depth camera, crossing | 4 | **0/5** | 0.350 | **4.27 m** | 9.45 m |
+
+Track *count* is correct throughout (2.0/2, 4.0/4, 12.0/12) — the camera sees
+everybody. What is wrong is the radius: a true 0.30 m pedestrian is carried as a
+3–9 m disk, 10–30× too large, and the inflation grows with crowd density.
+
+The mechanism is in `talos.py`'s radius estimator. It is written to never
+under-estimate, on the reasoning that an under-estimate is unsafe for ORCA — so
+both of its guards take a maximum against the previous value:
+
+```python
+if all(clip[name]):
+    radius = max(radius, prev['r'])          # hold outright
+else:
+    radius = max(radius, 0.99 * prev['r'])   # shrink at most 1% per frame
+```
+
+There is no upper bound. A single frame that over-estimates — two pedestrians
+merging into one blob, a depth outlier — latches, and the 1 %-per-frame release
+is far too slow to recover before the next over-estimate re-inflates it. The
+estimate ratchets monotonically upward for the whole run.
+
+Downstream, ORCA sees a neighbour disk that overlaps the robot, drops into its
+"already colliding" branch, and commands a full-speed escape: `|v_cmd|` sits at
+the 1.5 m/s cap for 97 % of the run, and the robot flees a crowd that is not
+where it thinks it is. In head-on there is enough free space to still get around
+and 8/10 runs finish; at crossing density none do.
+
+Note what perception does **not** cost: true clearance is 0.348–0.350 m in every
+row, the same constant as everywhere else. The robot's beliefs got much worse and
+its safety did not change at all — because, as Q-D and Q-G show, its safety was
+never the robot's doing.
+
+**Recommended fix** (one line, not applied here — it is the perception owner's
+call): clamp the estimate to a plausible pedestrian size, e.g.
+`radius = min(radius, 0.6)`. The "never under-estimate" instinct is right; it
+just needs a ceiling.
 
 ### Q-G — Whose avoidance is it?  → `figures/qg_cooperation.png`
 

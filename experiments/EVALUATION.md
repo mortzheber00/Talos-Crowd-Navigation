@@ -349,7 +349,47 @@ stated. If they collapse, then the honest headline for the whole project is
 "the robot walks through a crowd that avoids it", and the Q-C numbers describe
 the pedestrians' ORCA rather than the robot's.
 
-`[TBD table_qg_cooperation.csv]`
+**They collapse.** (79 runs, 39 paired)
+
+| condition | crowd | collision-free | clearance [m] | t_goal [s] | path ratio |
+|---|---|---|---|---|---|
+| head_on ×2 | cooperative | 100 % | +0.348 | 9.10 | 0.98 |
+| head_on ×2 | **blind** | **0 %** | **−0.544** | 15.36 | 1.47 |
+| crossing ×4 | cooperative | 100 % | +0.349 | 10.42 | 1.03 |
+| crossing ×4 | **blind** | **0 %** | **−0.524** | 20.71 | 1.82 |
+| random ×8 | cooperative | 100 % | +0.348 | 10.12 | 1.05 |
+| random ×8 | **blind** | **10 %** | **−0.487** | 13.08 | 1.26 |
+| random ×16 | cooperative | 100 % | +0.348 | 10.88 | 1.05 |
+| random ×16 | **blind** | **0 %** | **−0.558** | 17.84 | 2.14 |
+
+Paired Wilcoxon signed-rank on clearance: **W = 0, p = 3.6 × 10⁻¹²** over 39
+pairs. W = 0 means every single pair moved the same way — there is no seed, no
+scenario, no density at which removing the crowd's cooperation did not destroy
+the result.
+
+A clearance of −0.52 m against radii summing to 0.6 m puts the disks nearly
+concentric: the robot walks *through* the pedestrian. Nothing stops it, because
+the pedestrians are ghosts (`contact=False`), and the robot never fell in any
+blind run — it simply passed through people.
+
+**But the robot is not doing nothing.** Path ratio rises from ≈1.0 to 1.26–2.14
+and time-to-goal roughly doubles: the ORCA layer is plainly active and steering
+hard. It is just far too slow to matter. Q-B measured why — the robot walks at
+0.4 m/s and executes a command 1.57 s (two steps) after ORCA issues it, while
+pedestrians close at up to 1.3 m/s. A pedestrian covers ~2 m inside the robot's
+reaction lag. **The avoidance is not under-tuned, it is out-run.**
+
+This single experiment reinterprets every other result:
+
+* Q-C's 100 % across six scenarios — the crowd's doing.
+* Q-D's clearance constant at 0.348 m under every setting — it was never the
+  robot's parameter to move.
+* Q-E's absence of any density limit — density cannot challenge a robot that is
+  being avoided.
+* Q-F's finding that wrecking perception costs the goal but not safety (p = 0.76)
+  — safety was never coming from the robot's beliefs.
+
+Each of those was individually puzzling. One fact explains all four.
 
 ---
 

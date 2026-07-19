@@ -98,7 +98,6 @@ def _velocity_tracking(L, goal_tol):
 
     v_cmd = L.VCMD[ok]
     v_ach = L.COM_VEL_PB[ok, :2]
-    tt = t[ok]
 
     # only while the robot is actually being asked to move
     moving = np.linalg.norm(v_cmd, axis=1) > 0.05

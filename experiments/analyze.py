@@ -17,10 +17,9 @@ Chart conventions, applied throughout:
     alone.
 """
 
-import json
+import glob
 import os
 import sys
-import glob
 
 import numpy as np
 import pandas as pd
@@ -158,7 +157,6 @@ def qa():
         vals = df[col].dropna()
         mean = df[f"timing.{key}.mean_ms"].dropna().mean()
         p95 = vals.mean()
-        mx = df[f"timing.{key}.max_ms"].dropna().mean()
         y = len(ys)
         ys.append(y)
         labels.append(f"{label}\n({1e3 * budget:.0f} ms budget)")

@@ -413,6 +413,46 @@ This single experiment reinterprets every other result:
 
 Each of those was individually puzzling. One fact explains all four.
 
+### Q-G2 — how much cooperation, exactly?  → `figures/qg2_ped_responsibility.png`
+
+Q-G is a binary — fully cooperative vs blind. Q-G2 fills the middle: the crowd
+stays visible to the robot, but each pedestrian takes a smaller share of the
+avoidance (`ped_responsibility` from 0.5 down to 0.0). 150 runs.
+
+| `ped_responsibility` | head_on ×2 | crossing ×4 | random ×8 |
+|---|---|---|---|
+| 0.0 | 100 % | 100 % | **60 %** (40 % collide, clearance 0.17 m) |
+| 0.1 | 100 % | 100 % | 100 % |
+| 0.2 | 100 % | 100 % | 100 % |
+| 0.3 (shipped) | 100 % | 100 % | 100 % |
+| 0.5 | 100 % | 100 % | 100 % |
+
+**The curve has a sharp knee at 0.1, and it refines the Q-G story rather than
+repeating it.** Two things stand out:
+
+* The robot needs only a *little* crowd cooperation. Once each pedestrian takes
+  even 10 % of the avoidance, success is 100 % everywhere. It degrades only at
+  *exactly zero*, and only in the densest scene (random ×8: 40 % collide).
+* `ped_responsibility = 0` is far less catastrophic than Q-G's blind crowd (0 %
+  everywhere). The difference is real: at responsibility 0 the pedestrians still
+  *see* the robot and will not actively drive into it — they simply do not yield;
+  blind, they path straight through where it will be. So the robot's own ORCA
+  layer *is* adequate for a crowd that merely acknowledges its existence. It
+  collapses completely only against a crowd that cannot see it.
+
+Caveat, stated honestly: `ped_responsibility` applies to every neighbour a
+pedestrian has, so lowering it also makes them less willing to avoid *each
+other*. The reading is "a less accommodating crowd overall", not a clean
+robot-only isolation — for which a per-neighbour responsibility (a code change)
+would be needed. Given how sharp and interpretable the knee is, that refinement
+was not pursued.
+
+So the fair, final statement is not "the robot does nothing" but: **the robot's
+avoidance is sufficient for any crowd that can see it, and useless against one
+that cannot — and it is too slow to protect itself in either case if the crowd
+actively ignores it.** The shipped 0.3 sits comfortably on the safe side of the
+knee.
+
 ---
 
 ## 4. The story in one paragraph

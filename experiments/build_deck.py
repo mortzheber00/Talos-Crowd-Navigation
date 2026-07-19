@@ -12,7 +12,7 @@ SLIDES = [
  dict(n=1, arc="setup", qid="", head="Crowd navigation for a Talos humanoid",
       sub="An evaluation of what the ORCA-on-a-biped stack actually does",
       body="""<p>MuJoCo · Talos · ORCA crowd · LIP-MPC + TSID walking controller.
-      <strong>470 simulation runs</strong> across seven questions.</p>
+      <strong>620+ simulation runs</strong> across eight questions.</p>
       <p class="muted">Lara Heidtmann · Florian Bohnes · Sebastián Serna · Moritz Heber · Nicolas Guenther</p>""",
       fig=None, take=None),
 
@@ -60,7 +60,7 @@ SLIDES = [
       sub="Headless sweeps, 10 seeds per condition, metrics to disk",
       body="""<div class="split">
       <div><h4>Setup</h4><ul>
-      <li>470 runs, headless, 10 at a time</li>
+      <li>620+ runs, headless, 10 at a time</li>
       <li>each run its own <code>ROS_DOMAIN_ID</code> — without it, parallel runs share a DDS
       domain and one run's ORCA steers on another's odometry</li>
       <li>10 seeds per condition; simulator otherwise deterministic (verified)</li>
@@ -158,9 +158,28 @@ SLIDES = [
       <strong>The avoidance is out-run, not under-tuned.</strong></p>""",
       fig="qg_cooperation",
       take=("bad", "This reinterprets everything: Q-C's 100 %, Q-D's frozen clearance, Q-E's missing "
-            "density limit, and Q-F's p = 0.76. Four puzzles, one cause.")),
+            "density limit, Q-F's p = 0.76. Four puzzles, one cause — but <em>how much</em> cooperation? "
+            "Next slide.")),
 
- dict(n=12, arc="the resolution", qid="Q-F", head="Perception costs the goal, provably not safety",
+ dict(n=12, arc="the resolution", qid="Q-G2", head="But it only needs a little cooperation",
+      sub="150 runs — the dose-response between cooperative and blind",
+      body="""<p>Q-G is a binary. Q-G2 fills the middle: the crowd stays visible, but each
+      pedestrian takes a smaller share of the avoidance (<code>ped_responsibility</code> 0.5 → 0.0).</p>
+      <table class="data head"><thead><tr><th>ped_resp</th><th>head_on</th><th>crossing</th><th>random ×8</th></tr></thead><tbody>
+      <tr><td class="num">0.0</td><td class="num ok">100 %</td><td class="num ok">100 %</td><td class="num bad">60 %</td></tr>
+      <tr class="best"><td class="num">0.1</td><td class="num ok">100 %</td><td class="num ok">100 %</td><td class="num ok">100 %</td></tr>
+      <tr><td class="num">0.3 <span class="muted">(shipped)</span></td><td class="num ok">100 %</td><td class="num ok">100 %</td><td class="num ok">100 %</td></tr>
+      <tr><td class="num">0.5</td><td class="num ok">100 %</td><td class="num ok">100 %</td><td class="num ok">100 %</td></tr>
+      </tbody></table>
+      <p><strong>A sharp knee at 0.1.</strong> Once each pedestrian takes even 10 % of the avoidance,
+      success is 100 %. And note: zero responsibility (crowd sees the robot but won't yield) is far milder
+      than <em>blind</em> — the robot's own ORCA carries it as long as the crowd merely acknowledges it.</p>""",
+      fig="qg2_ped_responsibility",
+      take=("ok", "The honest refinement: the robot's avoidance is <em>sufficient for any crowd that can "
+            "see it</em>, and useless against one that cannot. Q-G's 0 % is the blind extreme, not the "
+            "whole story. The shipped 0.3 sits safely past the knee.")),
+
+ dict(n=14, arc="the resolution", qid="Q-F", head="Perception costs the goal, provably not safety",
       sub="60 runs, paired by scenario and seed",
       body="""<p>Collision-free success falls from 100 % to <b class="num bad">10 %</b> and time-to-goal
       roughly quadruples. Clearance does not move at all — <b class="num">p = 0.76</b> over 30 pairs.</p>
@@ -178,7 +197,7 @@ else:
       take=("fix", "Fix is a ceiling: <code>radius = min(radius, 0.6)</code>. The "
             "&ldquo;never under-estimate&rdquo; instinct is right; it just needs a bound.")),
 
- dict(n=13, arc="the resolution", qid="", head="What we would change",
+ dict(n=15, arc="the resolution", qid="", head="What we would change",
       sub="In priority order",
       body="""<ol class="rec">
       <li><strong>The bridge is too slow for the crowd's speed.</strong> Either slow the crowd to a speed
@@ -196,8 +215,8 @@ else:
       losing balance. With contact enabled the blind condition would look worse still.</li>
       <li>The shipped crowd avoids the robot using <em>ground-truth</em> robot state — more cooperative and
       better informed than any real crowd. Q-G quantifies how much that flatters us: all of it.</li>
-      <li>The blind condition is the opposite extreme; real pedestrians do look where they are going.
-      The truth is between the two and we have measured only the endpoints.</li>
+      <li>The blind condition is one extreme and the shipped cooperative crowd the other; Q-G2 measures
+      the middle, but a clean robot-only isolation (per-neighbour responsibility) was left unbuilt.</li>
       <li>Kinematic disks, not gait-driven humans. One robot, one goal, no static obstacles.</li></ul>""",
       fig=None, take=None),
 ]
@@ -350,7 +369,7 @@ html {{ scroll-behavior:smooth; }}
 
 <div class="wrap">
 {chr(10).join(slide_html(s) for s in SLIDES)}
-<footer>470 simulation runs · MuJoCo + ORCA + LIP-MPC/TSID · figures and tables regenerate from
+<footer>620+ simulation runs · MuJoCo + ORCA + LIP-MPC/TSID · figures and tables regenerate from
 <code>experiments/analyze.py</code></footer>
 </div>
 """

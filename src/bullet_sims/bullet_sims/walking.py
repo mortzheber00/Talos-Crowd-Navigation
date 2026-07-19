@@ -290,6 +290,13 @@ def _allocate_logs(N_sim, n_peds=0):
         MIN_SEP=nan(N_sim),                     # robot<->nearest-ped surface gap [m]
         MIN_SEP_PERC=nan(N_sim),                # ... as the robot perceives it
         N_TRACKS=nan(N_sim),                    # obstacles the robot currently has
+        # Largest radius among the current tracks [m]. True pedestrians are
+        # 0.3 m, so this is a direct read on whether the tracker's radius
+        # estimate has run away -- its two guards both take a max against the
+        # previous value, so an over-estimate can only be given back at 1% per
+        # frame and a believed clearance can go deeply negative while the true
+        # one is fine.
+        PERC_RMAX=nan(N_sim),
         DIST_GOAL=nan(N_sim),                   # robot distance to goal [m]
         VCMD=nan(N_sim, 2),                     # ORCA velocity command
         VPREF=nan(N_sim, 2),                    # goal-direction preferred velocity
@@ -1016,6 +1023,8 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             # the same gap as the robot believes it to be
             L.MIN_SEP_PERC[i] = _min_gap(ped_states)
             L.N_TRACKS[i] = len(ped_states)
+            if ped_states:
+                L.PERC_RMAX[i] = max(float(r) for (_, _, r) in ped_states)
             L.DIST_GOAL[i] = float(np.hypot(*(L.GOAL - com[:2])))
             L.VCMD[i] = v_cmd
             L.VPREF[i] = v_pref

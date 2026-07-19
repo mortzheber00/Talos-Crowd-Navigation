@@ -243,6 +243,24 @@ def summarize(L, meta, goal_tol=0.3):
         frac_healthy=float(np.mean(healthy[fin])) if fin.any() else float('nan'),
         # --- perception (only meaningful when the camera path is on) ---
         mean_n_tracks=float(np.nanmean(L.N_TRACKS[fin])) if fin.any() else float('nan'),
+        # The believed clearance and the largest believed radius. Together they
+        # say whether a perception run failed because the robot could not see
+        # the crowd, or because it saw it wrongly: tracks present and correct in
+        # number but carrying a runaway radius drive ORCA into its overlap
+        # branch, which commands a full-speed escape from an obstacle that is
+        # not there.
+        min_sep_perc_m=(float(np.nanmin(L.MIN_SEP_PERC[fin]))
+                        if fin.any() and np.isfinite(L.MIN_SEP_PERC[fin]).any()
+                        else float('nan')),
+        med_sep_perc_m=(float(np.nanmedian(L.MIN_SEP_PERC[fin]))
+                        if fin.any() and np.isfinite(L.MIN_SEP_PERC[fin]).any()
+                        else float('nan')),
+        perc_rmax_m=(float(np.nanmax(L.PERC_RMAX[fin]))
+                     if fin.any() and np.isfinite(L.PERC_RMAX[fin]).any()
+                     else float('nan')),
+        perc_rmed_m=(float(np.nanmedian(L.PERC_RMAX[fin]))
+                     if fin.any() and np.isfinite(L.PERC_RMAX[fin]).any()
+                     else float('nan')),
         n_peds_true=int(L.PED_XY.shape[1]),
     )
     out['timing'] = {k: _timing_stats(v) for k, v in L.TIMERS.items()}
@@ -268,7 +286,8 @@ def dump(L, meta, out_dir, run_id, goal_tol=0.3, save_series=True):
             DIST_GOAL=L.DIST_GOAL, VCMD=L.VCMD, VPREF=L.VPREF,
             COM_VEL_PB=L.COM_VEL_PB, COM_POS_PB=L.COM_POS_PB,
             ZMP_REF=L.ZMP_REF_LOG, ZMP_EST=L.ZMP_EST, DCM_EST=L.DCM_EST,
-            N_TRACKS=L.N_TRACKS, GOAL=L.GOAL, PED_RADII=L.PED_RADII,
+            N_TRACKS=L.N_TRACKS, PERC_RMAX=L.PERC_RMAX,
+            GOAL=L.GOAL, PED_RADII=L.PED_RADII,
         )
         np.savez_compressed(os.path.join(out_dir, f"{run_id}.npz"), **series)
 

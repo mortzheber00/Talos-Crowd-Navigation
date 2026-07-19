@@ -508,10 +508,15 @@ def qd():
     ax = axs[1]
     for k, m in enumerate(margins):
         sub = df[df.safety_margin == m].groupby("robot_responsibility")["min_sep_m"]
-        ax.plot(resps, [sub.median().get(r, np.nan) for r in resps], "-o",
-                color=C[k], lw=2, ms=7, label=f"margin {m} m")
-        ax.text(resps[-1] + 0.02, sub.median().get(resps[-1], np.nan),
-                f"{m} m", fontsize=9, color=INK, va="center")
+        vals = [sub.median().get(r, np.nan) for r in resps]
+        ax.plot(resps, vals, "-o", color=C[k], lw=2, ms=7, label=f"margin {m} m")
+        # direct label at the last point that actually has data -- an incomplete
+        # sweep leaves NaN cells, and matplotlib rejects a NaN text position
+        finite = [i for i, v in enumerate(vals) if np.isfinite(v)]
+        if finite:
+            i = finite[-1]
+            ax.text(resps[i] + 0.02, vals[i], f"{m} m", fontsize=9,
+                    color=INK, va="center")
     ax.axhline(0, color=BAD, ls="--", lw=1.2)
     ax.set_xlabel("robot responsibility")
     ax.set_ylabel("min. clearance [m]  (median)")
@@ -531,8 +536,9 @@ def qd():
             lbl.append(r)
         ax.plot(xs, ys, "-o", color=C[k], lw=1.6, ms=7, label=f"margin {m} m")
         for x, y, r in zip(xs, ys, lbl):
-            ax.annotate(f"{r}", (x, y), textcoords="offset points",
-                        xytext=(6, 5), fontsize=8, color=INK2)
+            if np.isfinite(x) and np.isfinite(y):
+                ax.annotate(f"{r}", (x, y), textcoords="offset points",
+                            xytext=(6, 5), fontsize=8, color=INK2)
     ax.set_xlabel("time to goal [s]  (median)")
     ax.set_ylabel("min. clearance [m]  (median)")
     ax.set_title("Trade-off  (point labels = responsibility)", loc="left")

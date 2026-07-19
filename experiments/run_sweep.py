@@ -167,6 +167,25 @@ def qb2_speed():
     return runs
 
 
+def qa_solo():
+    """Q-A, measured properly: timing on an otherwise idle machine.
+
+    The other experiments run 10 simulations at once to get through the sweep,
+    which is fine for every metric except this one -- ten processes contending
+    for 13 cores inflate every wall-clock number, and a real-time claim measured
+    under 10x self-inflicted load is worthless. Run this one with
+    ``--workers 1``; it is the only timing result that should be quoted.
+    """
+    runs = []
+    for sensor in (False, True):
+        for seed in (0, 1):
+            runs.append(_base(scenario="random", n_peds=12, seed=seed,
+                              pedestrian_sensor_data=sensor,
+                              walk_duration=30.0,
+                              run_id=f"qasolo_{'perc' if sensor else 'gt'}_s{seed}"))
+    return runs
+
+
 def qg_cooperation():
     """Q-G: is the robot avoiding the crowd, or is the crowd avoiding the robot?
 
@@ -197,6 +216,7 @@ def qg_cooperation():
 
 EXPERIMENTS = {
     "qab_timing": qab_timing,
+    "qa_solo": qa_solo,
     "qb2_speed": qb2_speed,
     "qg_cooperation": qg_cooperation,
     "qc_scenarios": qc_scenarios,

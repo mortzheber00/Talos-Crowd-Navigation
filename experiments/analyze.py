@@ -124,9 +124,19 @@ def _bar_ci(ax, labels, rates, los, his, colors, ylabel):
 # ---------------------------------------------------------------------------
 
 def qa():
-    df = _load("qab_timing")
+    # Prefer the uncontended measurement. The sweep runs 10 simulations at once,
+    # which inflates every wall-clock number; qa_solo is the same configuration
+    # run one at a time and is the only timing worth quoting.
+    df = _load("qa_solo")
+    contended = False
+    if df is None:
+        df = _load("qab_timing")
+        contended = True
     if df is None:
         return
+    if contended:
+        print("  WARNING: falling back to the contended sweep timings "
+              "(10 concurrent runs) -- run qa_solo with --workers 1")
 
     # Each layer runs at its own rate, so "is it real-time" is per-layer:
     # the budget is one period of that layer, not one control tick.
@@ -170,7 +180,10 @@ def qa():
     ax.set_xlabel("wall-clock time per invocation [ms, log scale]")
     ax.set_title("Per-layer compute cost against its own real-time budget\n"
                  "bar = p95, white dot = mean, tick = budget (one period at that "
-                 "layer's rate)", loc="left")
+                 "layer's rate)"
+                 + ("\nCONTENDED measurement -- 10 concurrent runs, upper bound"
+                    if contended else "\nmeasured one run at a time on an "
+                    "otherwise idle machine"), loc="left")
     ax.grid(axis="x", zorder=0)
     # identity without relying on colour
     ax.text(0.99, 0.02, "red = over budget", transform=ax.transAxes,
@@ -227,9 +240,11 @@ def qb():
         # the kinematic ceiling the footstep planner imposes
         ceiling = 1.4 * 0.25 / 0.8
         ax.axhline(ceiling, color=INK2, ls="--", lw=1.2)
-        ax.text(t[ok][-1], ceiling + 0.02,
+        # below the line and hard left: the commanded trace crosses this height
+        # repeatedly, so anything sitting on top of the line collides with it
+        ax.text(t[ok][0], ceiling - 0.03,
                 f"footstep clamp = 1.4·step_x/step_dur = {ceiling:.2f} m/s",
-                ha="right", va="bottom", fontsize=9, color=INK2)
+                ha="left", va="top", fontsize=9, color=INK2)
         ax.set_xlabel("time [s]")
         ax.set_ylabel("speed [m/s]")
         ax.set_title("ORCA asks for more speed than the biped can walk\n"
@@ -251,11 +266,14 @@ def qb():
         patch.set_alpha(0.85)
         patch.set_edgecolor(INK2)
     ax.axhline(1.0, color=INK2, ls="--", lw=1.2)
-    ax.text(0.5, 1.02, "1.0 = command fully executed", transform=ax.get_yaxis_transform(),
-            fontsize=9, color=INK2, va="bottom")
+    ax.text(0.02, 1.0, " 1.0 = command fully executed",
+            transform=ax.get_yaxis_transform(), fontsize=9, color=INK2,
+            va="bottom", ha="left")
+    # medians labelled beside the box rather than on it, so the number does not
+    # sit on the median line it describes
     for i, g in enumerate(parts):
-        ax.text(i + 1, np.median(g) + 0.03, f"{np.median(g):.2f}",
-                ha="center", fontsize=9, color=INK)
+        ax.annotate(f"{np.median(g):.2f}", (i + 1.29, np.median(g)),
+                    fontsize=9, color=INK, va="center", ha="left")
     ax.set_ylabel("achieved / commanded")
     ax.set_title(f"Fraction of the command actually executed\n"
                  f"({len(df)} runs)", loc="left")

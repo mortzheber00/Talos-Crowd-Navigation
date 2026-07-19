@@ -509,39 +509,32 @@ def qd():
     for k, m in enumerate(margins):
         sub = df[df.safety_margin == m].groupby("robot_responsibility")["min_sep_m"]
         vals = [sub.median().get(r, np.nan) for r in resps]
+        # The three lines sit on top of each other here, so direct labels would
+        # only collide; the legend carries identity for all three panels.
         ax.plot(resps, vals, "-o", color=C[k], lw=2, ms=7, label=f"margin {m} m")
-        # direct label at the last point that actually has data -- an incomplete
-        # sweep leaves NaN cells, and matplotlib rejects a NaN text position
-        finite = [i for i, v in enumerate(vals) if np.isfinite(v)]
-        if finite:
-            i = finite[-1]
-            ax.text(resps[i] + 0.02, vals[i], f"{m} m", fontsize=9,
-                    color=INK, va="center")
     ax.axhline(0, color=BAD, ls="--", lw=1.2)
+    ax.set_xlim(-0.05, 1.08)
+    ax.set_ylim(-0.02, 0.45)
     ax.set_xlabel("robot responsibility")
     ax.set_ylabel("min. clearance [m]  (median)")
-    ax.set_title("Safety", loc="left")
-    ax.grid(True); ax.legend(fontsize=9)
+    # The flatness is the finding, so the axis is held from 0 rather than
+    # auto-scaled to the 1.5 mm the three lines actually span.
+    ax.set_title("Safety — flat at 0.35 m, whatever we set", loc="left")
+    ax.grid(True); ax.legend(fontsize=9, loc="lower left")
 
-    # the trade-off itself: clearance bought vs time paid
+    # Where the parameters DO have an effect. Plotting clearance against
+    # time-to-goal would be the natural trade-off panel, but clearance spans
+    # 0.0015 m across the whole sweep -- on its own axis that noise fills the
+    # panel and reads as a trend. Efficiency is the axis that actually moves.
     ax = axs[2]
     for k, m in enumerate(margins):
-        xs, ys, lbl = [], [], []
-        for r in resps:
-            sel = df[(df.safety_margin == m) & (df.robot_responsibility == r)]
-            if not len(sel):
-                continue
-            xs.append(sel["t_goal_s"].median())
-            ys.append(sel["min_sep_m"].median())
-            lbl.append(r)
-        ax.plot(xs, ys, "-o", color=C[k], lw=1.6, ms=7, label=f"margin {m} m")
-        for x, y, r in zip(xs, ys, lbl):
-            if np.isfinite(x) and np.isfinite(y):
-                ax.annotate(f"{r}", (x, y), textcoords="offset points",
-                            xytext=(6, 5), fontsize=8, color=INK2)
-    ax.set_xlabel("time to goal [s]  (median)")
-    ax.set_ylabel("min. clearance [m]  (median)")
-    ax.set_title("Trade-off  (point labels = responsibility)", loc="left")
+        sub = df[df.safety_margin == m].groupby("robot_responsibility")["t_goal_s"]
+        vals = [sub.median().get(r, np.nan) for r in resps]
+        ax.plot(resps, vals, "-o", color=C[k], lw=2, ms=7, label=f"margin {m} m")
+    ax.set_xlim(-0.05, 1.08)
+    ax.set_xlabel("robot responsibility")
+    ax.set_ylabel("time to goal [s]  (median)")
+    ax.set_title("Efficiency  — the only thing these knobs change", loc="left")
     ax.grid(True); ax.legend(fontsize=9)
 
     fig.suptitle("Q-D  How much of the avoidance should the robot take on itself?",

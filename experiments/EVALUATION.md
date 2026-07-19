@@ -128,29 +128,58 @@ The mechanism result, and the most informative thing in the study.
 
 ORCA is configured to ask for 1.2 m/s. The reactive footstep planner clamps a
 step to `1.4 · step_size_x = 0.35 m` per `step_dur = 0.8 s`, i.e. **0.44 m/s**.
-So the command saturates the clamp essentially always: measured speed gain
-`[TBD]` (pilot: 0.23–0.37).
+So the command saturates the clamp essentially always.
 
-This is not a tracking bug, it is a **specification mismatch**, and it has a
-consequence that is easy to miss: the clamp scales the *whole* displacement
-vector, so the lateral (avoidance) component is attenuated by the same factor as
-the forward one. The robot under-executes avoidance in exact proportion to how
-much it over-asks for speed.
+Measured over 10 runs:
 
-Measured lateral lag `[TBD]` (pilot: 1.0–1.3 s ≈ 1.3–1.6 steps) — consistent
-with a planner committed one step ahead plus one step of execution. That lag is
-the irreducible cost of the bridge; the gain deficit is not.
+| quantity | value | reading |
+|---|---|---|
+| forward speed gain | **0.50** | half the commanded speed is delivered |
+| lateral (avoidance) gain | **1.08** | the avoidance component *is* executed |
+| lateral lag | **1.57 s ≈ 2 steps** | and it arrives two steps late |
+
+This is not a tracking bug, it is a **specification mismatch**: ORCA is asking
+for a speed that does not exist on this robot.
+
+A caveat on the mechanism, because the obvious story is wrong. `_advance`
+scales the *whole* displacement vector when it exceeds `max_step_len`, so one
+would expect the lateral component to be attenuated in the same proportion as
+the forward one — and it is not: lateral tracking is near unity while forward
+tracking is halved. What saturates is the forward component, which carries
+almost all of the command's magnitude; the lateral part is small enough to
+survive the clamp. **So the robot does execute avoidance — just two steps late.**
+The two-step lag is the irreducible cost of a planner committed one step ahead
+plus one step of execution. The speed deficit is not irreducible, and Q-B2 fixes
+it.
 
 ### Q-B2 — Matching ORCA's speed to the walker  → `figures/qb2_speed_matching.png`
 
 The intervention Q-B implies: sweep `desired_speed` ∈ {0.3, 0.45, 0.6, 1.2} m/s.
 
-Prediction: lowering it to ~0.45 m/s should **improve clearance and command
-tracking at no cost in time-to-goal**, because the extra commanded speed was
-never delivered. If time-to-goal does degrade, the saturation was doing useful
-work (always asking for maximum) and the mismatch is benign.
+Prediction: lowering it to ~0.45 m/s should **improve command tracking at no cost
+in time-to-goal**, because the extra commanded speed was never delivered.
 
-`[TBD table_qb2_speed.csv]`
+| `desired_speed` [m/s] | achieved [m/s] | speed gain | t_goal [s] | path ratio | collision-free |
+|---|---|---|---|---|---|
+| 0.30 | 0.299 | 1.02 | 14.53 | 1.075 | 100 % |
+| 0.45 | 0.387 | 0.93 | 10.73 | 1.024 | 100 % |
+| **0.60** | **0.403** | **0.76** | **10.18** | **1.016** | 100 % |
+| 1.20 (shipped) | 0.408 | 0.45 | 10.28 | 1.048 | 100 % |
+
+**Confirmed, with a sharper answer than predicted.** Achieved speed saturates at
+≈0.40 m/s — close to the 0.44 m/s the footstep clamp allows — and does not move
+once `desired_speed` passes 0.6. Between 0.6 and 1.2 the robot asks for twice the
+speed and arrives *no sooner* (10.18 s vs 10.28 s), while the command's gain
+falls from 0.76 to 0.45.
+
+The recommendation is **`desired_speed ≈ 0.6 m/s`**: fastest time-to-goal,
+straightest path (1.016), and a velocity command the robot still substantially
+executes. Dropping to 0.3 is the only setting that actually costs anything
+(+4.3 s), because it is below what the walker can do.
+
+Note what is *not* in this table: clearance is 0.348–0.349 m and the
+collision-free rate is 100 % in every row. Speed does not trade against safety
+here — for the same reason nothing else does (Q-D, Q-G).
 
 ### Q-C — Does it navigate?  → `figures/qc_scenarios.png`, `figures/qc_trajectories.png`
 
@@ -191,7 +220,39 @@ Responsibility 0.0 means the robot assumes pedestrians will do all the avoiding;
 1.0 means it yields entirely. The team currently ships 0.2 — i.e. the robot
 mostly expects to be avoided. Whether that is justified is exactly the question.
 
-`[TBD table_qd_responsibility.csv]`
+`[TBD table_qd_responsibility.csv]` — partial (64 of 120):
+
+| responsibility | margin | collision-free | min clearance [m] | t_goal [s] | path ratio |
+|---|---|---|---|---|---|
+| 0.0 | 0.1 | 90 % | 0.348 | 16.0 | 1.45 |
+| 0.0 | 0.2 | 90 % | 0.348 | 16.0 | 1.41 |
+| 0.0 | 0.4 | 100 % | 0.348 | 15.0 | 1.19 |
+| 0.2 | 0.1 | 100 % | 0.348 | 9.9 | 1.04 |
+| 0.2 | 0.2 | 100 % | 0.348 | 10.1 | 1.05 |
+| 0.2 | 0.4 | 100 % | 0.348 | 12.4 | 1.17 |
+| 0.5 | 0.1 | 100 % | 0.349 | 9.4 | 1.01 |
+
+**The headline is the column that does not move.** Minimum clearance is 0.348 m
+in every cell — the robot's safety margin can be 0.1 m or 0.4 m, its
+responsibility 0.0 or 0.5, and the achieved clearance does not shift by a
+millimetre.
+
+That number is not the robot's. The pedestrians treat the robot as an ORCA
+neighbour of radius 0.35 m and each side carries half of the 0.3 m
+personal-space buffer, so the crowd converges to 0.35 + 0.15 + 0.3 + 0.15 =
+0.95 m of centre separation — a surface gap of 0.95 − 0.3 − 0.3 = **0.35 m**.
+The measured value is that constant. **The crowd is setting the clearance, and
+the robot's entire safety configuration is inert.**
+
+What the robot's responsibility *does* buy is efficiency, and the effect is
+large: at 0.0 the robot needs 15–16 s and walks 1.4× the straight-line distance
+(it is shoved around and has to recover); at 0.2–0.5 it needs ~9–10 s at ≈1.0×.
+So the shipped 0.2 is a reasonable choice — but for goal efficiency, not for
+safety, which is not what the parameter's name suggests.
+
+This is the strongest possible motivation for Q-G: a safety parameter that
+changes nothing about safety is what you would expect if the robot were not the
+thing doing the avoiding.
 
 ### Q-E — Density limit  → `figures/qe_density.png`
 

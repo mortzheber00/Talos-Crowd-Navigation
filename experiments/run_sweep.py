@@ -52,7 +52,8 @@ SEEDS = list(range(10))
 def _base(**kw):
     cfg = dict(scenario="random", n_peds=8, pedestrian_sensor_data=False,
                robot_responsibility=0.2, ped_responsibility=0.3,
-               safety_margin=0.2, walk_duration=45.0, render=False)
+               safety_margin=0.2, crowd_avoids_robot=True,
+               walk_duration=45.0, render=False)
     cfg.update(kw)
     return cfg
 
@@ -166,9 +167,38 @@ def qb2_speed():
     return runs
 
 
+def qg_cooperation():
+    """Q-G: is the robot avoiding the crowd, or is the crowd avoiding the robot?
+
+    In the shipped configuration every pedestrian treats the robot as an ORCA
+    neighbour, using the simulator's exact robot state -- a perfectly cooperative
+    crowd with perfect information about the robot. A 100% success rate under
+    those conditions does not establish that the robot avoids anyone, because the
+    crowd would part around a fencepost too.
+
+    This turns the pedestrians blind to the robot, so every metre of clearance
+    has to come from the robot's own ORCA layer. The gap between the two
+    conditions is the robot's actual contribution -- and the cooperative number
+    is the one to distrust when reporting results.
+
+    Run at two densities so the effect is not read off a single crowd size.
+    """
+    runs = []
+    for coop in (True, False):
+        for scen, n in (("head_on", 2), ("crossing", 4), ("random", 8),
+                        ("random", 16)):
+            for seed in SEEDS:
+                runs.append(_base(scenario=scen, n_peds=n, seed=seed,
+                                  crowd_avoids_robot=coop,
+                                  run_id=f"qg_{'coop' if coop else 'blind'}"
+                                         f"_{scen}{n}_s{seed}"))
+    return runs
+
+
 EXPERIMENTS = {
     "qab_timing": qab_timing,
     "qb2_speed": qb2_speed,
+    "qg_cooperation": qg_cooperation,
     "qc_scenarios": qc_scenarios,
     "qd_responsibility": qd_responsibility,
     "qe_density": qe_density,

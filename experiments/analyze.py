@@ -710,7 +710,103 @@ def qf():
         print(f"  (wilcoxon skipped: {e})")
 
 
-ALL = dict(qa=qa, qb=qb, qb2=qb2, qc=qc, qc_traj=qc_traj, qd=qd, qe=qe, qf=qf)
+# ---------------------------------------------------------------------------
+# Q-G: whose avoidance is it?
+# ---------------------------------------------------------------------------
+
+def qg():
+    df = _load("qg_cooperation")
+    if df is None:
+        return
+    df["crowd"] = np.where(df["crowd_avoids_robot"], "cooperative crowd",
+                           "crowd blind to robot")
+    df["cond"] = df["scenario"] + " ×" + df["n_peds"].astype(str)
+    conds = list(dict.fromkeys(df.sort_values(["scenario", "n_peds"])["cond"]))
+    modes = ["cooperative crowd", "crowd blind to robot"]
+    colors = {"cooperative crowd": C[0], "crowd blind to robot": C[3]}
+
+    fig, axs = plt.subplots(1, 3, figsize=(15, 4.4))
+
+    ax = axs[0]
+    x = np.arange(len(conds))
+    w = 0.36
+    for i, mode in enumerate(modes):
+        rates, lo_e, hi_e = [], [], []
+        for c in conds:
+            sel = df[(df.cond == c) & (df["crowd"] == mode)]
+            p, lo, hi = _rate(sel["success_collision_free"])
+            rates.append(p); lo_e.append(p - lo); hi_e.append(hi - p)
+        pos = x + (i - 0.5) * w
+        ax.bar(pos, rates, width=w * 0.92, color=colors[mode], label=mode, zorder=2)
+        ax.errorbar(pos, rates, yerr=[lo_e, hi_e], fmt="none", ecolor=INK2,
+                    elinewidth=1.1, capsize=3, zorder=3)
+        for xi, r in zip(pos, rates):
+            ax.text(xi, r + 0.03, f"{100 * r:.0f}", ha="center", fontsize=8,
+                    color=INK)
+    ax.set_xticks(x); ax.set_xticklabels(conds, rotation=20)
+    ax.set_ylim(0, 1.15)
+    ax.set_yticks([0, 0.5, 1.0]); ax.set_yticklabels(["0", "50%", "100%"])
+    ax.set_ylabel("collision-free success")
+    ax.set_title("Outcome", loc="left")
+    ax.grid(axis="y", zorder=0); ax.legend(fontsize=9)
+
+    ax = axs[1]
+    piv = df.pivot_table(index=["scenario", "n_peds", "seed"], columns="crowd",
+                         values="min_sep_m").dropna()
+    for _, row in piv.iterrows():
+        ax.plot([0, 1], [row["cooperative crowd"], row["crowd blind to robot"]],
+                "-", lw=1.0, color=INK2, alpha=0.4, zorder=2)
+    ax.plot(np.zeros(len(piv)), piv["cooperative crowd"], "o", ms=7,
+            color=C[0], zorder=3)
+    ax.plot(np.ones(len(piv)), piv["crowd blind to robot"], "o", ms=7,
+            color=C[3], zorder=3)
+    ax.axhline(0, color=BAD, ls="--", lw=1.2)
+    ax.text(1.3, 0.005, "contact", ha="right", va="bottom", fontsize=9, color=BAD)
+    ax.set_xlim(-0.35, 1.35)
+    ax.set_xticks([0, 1]); ax.set_xticklabels(["cooperative", "blind"])
+    ax.set_ylabel("min. clearance [m]")
+    d = piv["crowd blind to robot"] - piv["cooperative crowd"]
+    ax.set_title(f"Paired clearance\nmedian change {d.median():+.3f} m "
+                 f"({len(piv)} pairs)", loc="left")
+    ax.grid(axis="y")
+
+    ax = axs[2]
+    for i, mode in enumerate(modes):
+        vals = [df[(df.cond == c) & (df["crowd"] == mode)]["path_ratio"].median()
+                for c in conds]
+        ax.plot(x, vals, "-o", color=colors[mode], lw=2, ms=7, label=mode)
+    ax.axhline(1.0, color=INK2, ls="--", lw=1.2)
+    ax.set_xticks(x); ax.set_xticklabels(conds, rotation=20)
+    ax.set_ylabel("path length / straight line")
+    ax.set_title("Detour the robot had to make", loc="left")
+    ax.grid(True); ax.legend(fontsize=9)
+
+    fig.suptitle("Q-G  Is the robot avoiding the crowd, or the crowd avoiding "
+                 "the robot?", x=0.02, ha="left", fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    _save(fig, "qg_cooperation")
+
+    t = df.groupby(["scenario", "n_peds", "crowd"]).agg(
+        n=("success", "size"), success=("success", "mean"),
+        collision_free=("success_collision_free", "mean"),
+        fell=("fell", "mean"), collided=("collided", "mean"),
+        min_sep=("min_sep_m", "median"), t_goal=("t_goal_s", "median"),
+        path_ratio=("path_ratio", "median")).round(3)
+    t.to_csv(os.path.join(RESULTS, "table_qg_cooperation.csv"))
+    print(t.to_string())
+    try:
+        from scipy.stats import wilcoxon
+        if len(piv) >= 6:
+            stat, p = wilcoxon(piv["cooperative crowd"],
+                               piv["crowd blind to robot"])
+            print(f"\n  Wilcoxon signed-rank on paired clearance: "
+                  f"W={stat:.1f}, p={p:.4g}  (n={len(piv)} pairs)")
+    except Exception as e:
+        print(f"  (wilcoxon skipped: {e})")
+
+
+ALL = dict(qa=qa, qb=qb, qb2=qb2, qc=qc, qc_traj=qc_traj, qd=qd, qe=qe, qf=qf,
+           qg=qg)
 
 
 def main():

@@ -32,9 +32,17 @@ That question splits into six:
 | **Q-D** | How much of the avoidance should the robot take on itself? | trade-off |
 | **Q-E** | At what crowd density does it break? | limits |
 | **Q-F** | What does onboard perception cost versus ground truth? | ablation |
+| **Q-G** | Is the robot avoiding the crowd, or the crowd avoiding the robot? | attribution |
 
-Q-C is the project's stated success criteria. Q-A, Q-B, Q-D–F are what make the
+Q-C is the project's stated success criteria. Q-A, Q-B, Q-D–G are what make the
 result a study rather than a demo.
+
+**Q-G was added after Q-C came back at 100 % everywhere.** A result that good,
+that uniform, is a signal to check the setup rather than to celebrate: the
+pedestrians avoid the robot reciprocally, using the simulator's exact robot
+state, so a crowd that parts politely around a fencepost would score identically.
+Q-G removes the crowd's knowledge of the robot and re-measures. It is the
+question that decides whether any of the other numbers describe the robot.
 
 ---
 
@@ -148,17 +156,32 @@ work (always asking for maximum) and the mismatch is benign.
 
 Six scenarios × 10 seeds against an empty-world control.
 
-`[TBD table_qc_scenarios.csv]`
+| scenario | n | collision-free | fell | min clearance [m] | t_goal [s] | path ratio | ZMP RMSE [m] |
+|---|---|---|---|---|---|---|---|
+| empty (control) | 3 | 100 % | 0 | – | 8.95 | 0.97 | 0.123 |
+| head_on | 10 | 100 % | 0 | 0.348 | 9.10 | 0.98 | 0.113 |
+| crossing | 10 | 100 % | 0 | 0.349 | 10.42 | 1.03 | 0.113 |
+| corridor | 10 | 100 % | 0 | 0.348 | 11.18 | 1.04 | 0.110 |
+| circle | 10 | 100 % | 0 | 0.349 | 12.40 | 1.06 | 0.113 |
+| random (8 peds) | 10 | 100 % | 0 | 0.348 | 10.12 | 1.05 | 0.114 |
 
-Partial results (n = 29 of 53): `empty`, `head_on`, `crossing` and `corridor`
-all at 100 % collision-free success, min clearance ≈ 0.35 m, path ratio
-0.97–1.05.
+**All stated success criteria are met**: ≥5 moving pedestrians (`random`,
+`corridor`, `circle`), zero collisions in 100 % of runs (bar: 80 %), and — from
+Q-A — planning well inside real time.
 
-The clearance being *pinned* near 0.35 m rather than varying is itself
-mechanistic: ORCA plans with an inflated robot radius (0.35 physical + 0.2
-safety margin) against pedestrians carrying half the 0.3 m personal-space
-buffer, so the surface gap it converges to is set by those constants, not by the
-scenario. Q-D tests that directly.
+Two things in this table matter more than the success rate.
+
+First, **clearance is pinned at 0.348–0.349 m in every scenario**, identical to
+three decimals. That is not a coincidence, it is a constant: ORCA plans with an
+inflated robot radius (0.35 physical + 0.2 safety margin) against pedestrians
+carrying half the 0.3 m personal-space buffer, so the separation it converges to
+is set by those constants and not by the encounter. Q-D varies them to confirm it.
+
+Second, **the path ratio never exceeds 1.06** — the robot walks almost straight
+through every crowd (see `figures/qc_trajectories.png`; the visible waviness is
+the gait's lateral sway, not avoidance). A robot that never has to deviate and
+never collides is either very good or never actually challenged. That is what
+Q-G asks.
 
 ### Q-D — Who yields?  → `figures/qd_responsibility.png`
 
@@ -182,6 +205,22 @@ Ground truth vs onboard depth camera, paired by (scenario, seed).
 
 `[TBD table_qf_perception.csv]`
 
+### Q-G — Whose avoidance is it?  → `figures/qg_cooperation.png`
+
+The attribution experiment, added because Q-C was too clean.
+
+Cooperative crowd (shipped default) vs a crowd blind to the robot, paired by
+(scenario, density, seed), at four conditions: head-on ×2, crossing ×4,
+random ×8, random ×16.
+
+If the collision-free rate and clearance hold up with a blind crowd, the robot's
+ORCA layer is genuinely doing the avoidance and every other result stands as
+stated. If they collapse, then the honest headline for the whole project is
+"the robot walks through a crowd that avoids it", and the Q-C numbers describe
+the pedestrians' ORCA rather than the robot's.
+
+`[TBD table_qg_cooperation.csv]`
+
 ---
 
 ## 4. Slide plan (≈12 slides)
@@ -198,18 +237,24 @@ Ground truth vs onboard depth camera, paired by (scenario, seed).
 | 8 | **Q-B** The bridge | Commanded vs achieved speed. Punchline: the specification mismatch |
 | 9 | **Q-B2** The fix | Speed sweep — did matching the setpoint help? |
 | 10 | **Q-D** Who yields | The trade-off plot |
-| 11 | **Q-E/F** Limits | Density breaking point + perception ablation |
-| 12 | Conclusions | What we would change; honest limitations |
+| 11 | **Q-G** Whose avoidance? | Cooperative vs blind crowd — the honesty slide |
+| 12 | **Q-E/F** Limits | Density breaking point + perception ablation |
+| 13 | Conclusions | What we would change; honest limitations |
 
-### Honest limitations to state on slide 12
+Slide 11 is the one that makes this a study. Presenting a 100 % success rate and
+then showing the experiment that tries to break your own result is worth more
+than any additional scenario.
+
+### Honest limitations to state on slide 13
 
 - Pedestrians are **ghosts** (`contact=False`) — a collision is measured
   geometrically, never physically. The robot is never destabilised by an
   impact, so collision counts are a planning metric, not a safety-of-contact
   one.
-- Pedestrians avoid the robot **reciprocally using ground truth**, even when
-  the robot itself only has camera data. The crowd is more cooperative than a
-  real one, which flatters every success rate here.
+- In the default configuration pedestrians avoid the robot **reciprocally using
+  ground truth**, even when the robot itself only has camera data — a crowd both
+  more cooperative and better informed than a real one. Q-G quantifies exactly
+  how much that flatters the results.
 - The crowd model is kinematic disks, not gait-driven humans.
 - One robot, one goal, one map; no static obstacles.
 - Wall-clock timings are from a shared 13-core dev container running 10 sims

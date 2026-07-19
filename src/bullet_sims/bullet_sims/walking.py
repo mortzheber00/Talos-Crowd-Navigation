@@ -106,6 +106,15 @@ SAFETY_MARGIN = 0.2       # [m] extra radius the robot's ORCA plans with
 # survives. Exposed so that mismatch can be measured rather than assumed.
 DESIRED_SPEED = 1.2       # [m/s] cruising speed ORCA plans toward the goal at
 MAX_SPEED = 1.5           # [m/s] cap ORCA puts on its own command
+# Whether the pedestrians avoid the robot back. True is the reciprocal crowd the
+# demo ships: every pedestrian treats the robot as an ORCA neighbour, using the
+# simulator's exact robot state. That is a cooperative crowd, and it means a
+# successful run does not by itself show that the *robot* avoided anyone --
+# the crowd may simply have parted around it. Setting this False makes the
+# pedestrians blind to the robot, so all avoidance has to come from the robot's
+# own ORCA layer. The difference between the two is the robot's actual
+# contribution.
+CROWD_AVOIDS_ROBOT = True
 OUT_DIR = ""              # non-empty: batch mode. Write metrics here, skip plots.
 RUN_ID = "run"            # basename of the metrics files
 EARLY_STOP = True         # batch mode: end the run once it is decided
@@ -959,8 +968,13 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         body_id = robot.robot.id()
         com = simulator.computeComPosition(body_id)
         vcom = simulator.computeComVelocity(body_id)
-        # move the crowd (pedestrians avoid the robot via ground truth either way)
-        crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
+        # move the crowd. Handing the robot over as an external agent is what
+        # makes the pedestrians avoid it back (see CROWD_AVOIDS_ROBOT); with an
+        # empty list they are blind to it and every metre of clearance has to be
+        # earned by the robot's own ORCA layer.
+        crowd.update(conf.dt,
+                     external_agents=[(com[:2], vcom[:2], 0.35)]
+                     if CROWD_AVOIDS_ROBOT else [])
 
         # process pending ROS callbacks: the ORCA node consumes odom +
         # obstacles and publishes cmd_vel; our cached nav.* values update here
@@ -1269,6 +1283,7 @@ def _read_runtime_params():
     global SCENARIO, PEDESTRIAN_SENSOR_DATA
     global RENDER, SEED, N_PEDS, ROBOT_RESPONSIBILITY, PED_RESPONSIBILITY
     global SAFETY_MARGIN, OUT_DIR, RUN_ID, WALK_DURATION, ROBOT_GOAL
+    global CROWD_AVOIDS_ROBOT
     global DESIRED_SPEED, MAX_SPEED
     node = rclpy.create_node("walking_params")
 
@@ -1284,6 +1299,7 @@ def _read_runtime_params():
     ROBOT_RESPONSIBILITY = float(_p("robot_responsibility", ROBOT_RESPONSIBILITY))
     PED_RESPONSIBILITY = float(_p("ped_responsibility", PED_RESPONSIBILITY))
     SAFETY_MARGIN = float(_p("safety_margin", SAFETY_MARGIN))
+    CROWD_AVOIDS_ROBOT = _p("crowd_avoids_robot", CROWD_AVOIDS_ROBOT)
     DESIRED_SPEED = float(_p("desired_speed", DESIRED_SPEED))
     MAX_SPEED = float(_p("max_speed", MAX_SPEED))
     WALK_DURATION = float(_p("walk_duration", WALK_DURATION))
@@ -1295,7 +1311,8 @@ def _read_runtime_params():
     print(f"[walking] scenario='{SCENARIO}' seed={SEED} n_peds={N_PEDS} "
           f"sensor={PEDESTRIAN_SENSOR_DATA} render={RENDER} "
           f"resp_robot={ROBOT_RESPONSIBILITY} resp_ped={PED_RESPONSIBILITY} "
-          f"margin={SAFETY_MARGIN} goal={ROBOT_GOAL} dur={WALK_DURATION}"
+          f"margin={SAFETY_MARGIN} crowd_avoids_robot={CROWD_AVOIDS_ROBOT} "
+          f"goal={ROBOT_GOAL} dur={WALK_DURATION}"
           + (f" -> {OUT_DIR}/{RUN_ID}" if OUT_DIR else ""))
 
 
@@ -1364,6 +1381,7 @@ def main():
                     robot_responsibility=ROBOT_RESPONSIBILITY,
                     ped_responsibility=PED_RESPONSIBILITY,
                     safety_margin=SAFETY_MARGIN,
+                    crowd_avoids_robot=CROWD_AVOIDS_ROBOT,
                     desired_speed=DESIRED_SPEED, max_speed=MAX_SPEED,
                     goal_x=ROBOT_GOAL[0], goal_y=ROBOT_GOAL[1],
                     walk_duration=WALK_DURATION, wall_time_s=t_wall)

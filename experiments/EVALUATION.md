@@ -111,16 +111,38 @@ and normality is not assumed.
 Each layer is measured against **its own period**, not a single control tick:
 ORCA at 30 Hz has 33 ms, the MPC at 10 Hz has 100 ms, TSID at 300 Hz has 3.3 ms.
 
-`[TBD table_qa_timing.csv]`
+Measured by `qa_solo` — 4 runs, **one at a time on an otherwise idle machine**.
+The sweep's own timings (10 concurrent simulations) are roughly 2× inflated and
+are deliberately not quoted; a real-time claim measured under self-inflicted load
+is worthless.
 
-Pilot values (n = 2, indicative): ORCA 0.08–1.0 ms p95 — negligible, ~3 % of
-its budget. LIP-MPC 12–14 ms against 100 ms. TSID 2.9 ms against 3.3 ms —
-**87 % of budget, the tightest margin in the stack**. Depth perception ~50 ms
-against 33 ms — **over budget**.
+| layer | rate | budget | mean [ms] | p95 [ms] | % of budget |
+|---|---|---|---|---|---|
+| ORCA solve | 30 Hz | 33.3 ms | 0.30 | 0.62 | **1.8 %** |
+| Footstep planner | 1.25 Hz | 800 ms | 0.29 | 0.54 | 0.1 % |
+| LIP-MPC (Drake QP) | 10 Hz | 100 ms | 6.04 | 11.96 | 12.0 % |
+| TSID whole-body | 300 Hz | 3.33 ms | 1.30 | 2.33 | 69.8 % |
+| MuJoCo step | 300 Hz | 3.33 ms | 0.70 | 1.17 | 35.0 % |
+| Depth perception | 30 Hz | 33.3 ms | 30.95 | 44.74 | **134 %** |
 
-The headline: *the avoidance planner is free; the whole-body controller and the
-perception front-end are what cost.* ORCA being 1 % of the compute is itself the
-finding — the interesting engineering was never the solver.
+**The project's "≤50 ms per planning step" criterion is met comfortably**: the
+whole navigation stack — ORCA plus footstep planner plus MPC — costs ≈13 ms p95.
+
+Two honest caveats:
+
+* **The 300 Hz loop is marginally over budget in sum.** TSID (2.33 ms) plus the
+  MuJoCo step (1.17 ms) is 3.5 ms p95 against a 3.33 ms period. That is why the
+  simulation runs ~3× slower than realtime, and it is the tightest margin in the
+  stack — not the planner.
+* **Perception's 1115 ms maximum is a first-call artefact** (renderer allocation
+  on the first frame), not a recurring stall. The meaningful figure is the
+  44.7 ms p95, which is genuinely over its 33 ms budget.
+
+The headline: *the avoidance planner is free.* ORCA is 1.8 % of its budget and
+the footstep planner 0.1 % of its own. Everything expensive in this system is
+either the whole-body controller or the perception front-end — the interesting
+engineering was never the solver, and Q-G shows the solver was not what produced
+the results either.
 
 ### Q-B — Does the bridge execute the command?  → `figures/qb_command_tracking.png`
 

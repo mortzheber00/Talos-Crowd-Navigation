@@ -51,14 +51,24 @@ def corridor(crowd, n_each=3, length=8.0, width=1.6, speed=1.2):
     return crowd
 
 
-def random_crowd(crowd, n=12, extent=5.0, min_start_gap=1.0, seed=0):
-    """N pedestrians with random, non-overlapping starts and random goals."""
+def random_crowd(crowd, n=12, extent=5.0, min_start_gap=1.0, seed=0,
+                 clear_radius=0.0, clear_centre=(0.0, 0.0)):
+    """N pedestrians with random, non-overlapping starts and random goals.
+
+    ``clear_radius`` keeps starts out of a disk around ``clear_centre`` (the
+    robot's spawn). Without it a pedestrian can materialise on top of the robot,
+    which scores as a collision before the run has begun -- a spawn artefact, not
+    an avoidance failure.
+    """
     rng = np.random.default_rng(seed)
+    centre = np.asarray(clear_centre, dtype=float)
     starts = []
     tries = 0
     while len(starts) < n and tries < 10000:
         tries += 1
         c = rng.uniform(-extent, extent, 2)
+        if clear_radius > 0.0 and np.hypot(*(c - centre)) < clear_radius:
+            continue
         if all(np.hypot(*(c - s)) >= min_start_gap for s in starts):
             starts.append(c)
     for s in starts:

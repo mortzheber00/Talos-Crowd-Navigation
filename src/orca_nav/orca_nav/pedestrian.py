@@ -68,7 +68,7 @@ class PedestrianSimulator:
                  radius=0.3,
                  height=1.7,
                  max_speed=1.3,
-                 responsibility=0.5,
+                 responsibility=0.3,
                  goal_tol=0.3,
                  pref_perturb=0.0,
                  personal_space=0.1,

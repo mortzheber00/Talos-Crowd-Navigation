@@ -30,7 +30,7 @@ class RobotORCA:
                  safety_margin=0.2,
                  goal_tol=0.3,
                  brake_radius=0.6,
-                 responsibility=0.5,
+                 responsibility=0.2,
                  params=None):
         """
         Args:
@@ -129,7 +129,7 @@ class RobotORCA:
 def robot_orca_velocity(position, velocity, goal, ped_states,
                         radius=0.35, max_speed=0.4, desired_speed=0.25,
                         safety_margin=0.2, goal_tol=0.3, brake_radius=0.6,
-                        responsibility=0.5, params=None):
+                        responsibility=0.2, params=None):
     """One-shot version of ``RobotORCA.compute_velocity``. Builds a RobotORCA with
     the given settings and returns the velocity command. Handy for a quick call
     inside the walking loop without keeping state around."""

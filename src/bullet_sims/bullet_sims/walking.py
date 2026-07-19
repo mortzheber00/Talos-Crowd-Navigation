@@ -3,6 +3,7 @@ talos walking simulation
 """
 
 import signal
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -89,6 +90,27 @@ TOUCHDOWN_FZ = 475.0       # [N]
 SCENARIO = "random"              # crowd scenario: head_on | crossing | circle | corridor | random
 PEDESTRIAN_SENSOR_DATA = True    # True: depth-camera perception; False: ground-truth states
 
+# ---- evaluation / batch parameters -----------------------------------------
+# Everything below exists so a sweep can run the same binary many times without
+# editing code. Defaults reproduce the interactive demo exactly.
+RENDER = True             # False: no MuJoCo viewer (required for batch runs)
+SEED = 0                  # RNG seed: crowd layout + preferred-velocity noise
+N_PEDS = 12               # pedestrians in the 'random' scenario (density sweep)
+ROBOT_RESPONSIBILITY = 0.2   # ORCA reciprocity share taken by the robot
+PED_RESPONSIBILITY = 0.3     # ... and by each pedestrian
+SAFETY_MARGIN = 0.2       # [m] extra radius the robot's ORCA plans with
+# ORCA's speed setpoints. Note these are what ORCA *asks* for, not what the
+# walker delivers: the footstep planner clamps a step to max_step_len
+# (1.4 * step_size_x) per step_dur, i.e. ~0.44 m/s, so a desired_speed above
+# that saturates the clamp permanently and ORCA's command direction is all that
+# survives. Exposed so that mismatch can be measured rather than assumed.
+DESIRED_SPEED = 1.2       # [m/s] cruising speed ORCA plans toward the goal at
+MAX_SPEED = 1.5           # [m/s] cap ORCA puts on its own command
+OUT_DIR = ""              # non-empty: batch mode. Write metrics here, skip plots.
+RUN_ID = "run"            # basename of the metrics files
+EARLY_STOP = True         # batch mode: end the run once it is decided
+                          # (goal reached and settled, or the robot has fallen)
+
 
 ################################################################################
 # setup helpers
@@ -106,7 +128,7 @@ def _setup_simulator():
     conf.no_sim_per_step = int(round(conf.step_dur / conf.dt))
 
     return PybulletWrapper(sim_rate=frequency, num_solver_iterations=50,
-                           num_sub_steps=8, render=True,
+                           num_sub_steps=8, render=RENDER,
                            collision_boxes=conf.sole_collision_boxes)
 
 
@@ -116,10 +138,22 @@ def _setup_crowd(simulator):
     Must run before the robot is created: adding pedestrian bodies changes the MuJoCo
     model, forcing a recompile that resets simulation state and would wipe the
     robot's pose.
+
+    ``SEED`` drives both the layout (for scenarios that randomise one) and the
+    preferred-velocity noise, so repeated runs of the same seed are identical and
+    different seeds are independent samples.
     """
     crowd = PedestrianSimulator(simulator, radius=0.3, max_speed=1.3,
-                                pref_perturb=0.05, personal_space=0.3)
-    scenarios.build(crowd, SCENARIO)
+                                pref_perturb=0.05, personal_space=0.3,
+                                responsibility=PED_RESPONSIBILITY, seed=SEED)
+    # only 'random' takes a layout seed / population size; the scripted scenarios
+    # are fixed geometry by design (their randomness is the perturbation only)
+    if SCENARIO == "random":
+        # clear_radius keeps the crowd off the robot's spawn, so a run never
+        # starts already in collision
+        scenarios.build(crowd, SCENARIO, n=N_PEDS, seed=SEED, clear_radius=1.5)
+    else:
+        scenarios.build(crowd, SCENARIO)
     return crowd
 
 
@@ -238,8 +272,15 @@ def _allocate_logs(N_sim, n_peds=0):
     return SimpleNamespace(
         # --- crowd navigation ---
         ROBOT_XY=nan(N_sim, 2),                 # robot CoM ground path
-        PED_XY=nan(N_sim, max(n_peds, 1), 2),   # pedestrian ground paths
+        PED_XY=nan(N_sim, max(n_peds, 1), 2),   # pedestrian ground paths (TRUTH)
+        # Two separations, because the robot can only avoid what it believes in.
+        # MIN_SEP is the ground-truth gap -- the safety metric, and the only one
+        # a collision may be counted from. MIN_SEP_PERC is the same quantity
+        # computed from the robot's own obstacle estimates; with perception on,
+        # the difference between them is exactly what the camera is costing.
         MIN_SEP=nan(N_sim),                     # robot<->nearest-ped surface gap [m]
+        MIN_SEP_PERC=nan(N_sim),                # ... as the robot perceives it
+        N_TRACKS=nan(N_sim),                    # obstacles the robot currently has
         DIST_GOAL=nan(N_sim),                   # robot distance to goal [m]
         VCMD=nan(N_sim, 2),                     # ORCA velocity command
         VPREF=nan(N_sim, 2),                    # goal-direction preferred velocity
@@ -284,6 +325,13 @@ def _allocate_logs(N_sim, n_peds=0):
         PELVIS_YAW_MEAS=nan(N_sim),  # measured yaw of base_link [rad]
         Q_TORSO1=nan(N_sim),         # waist yaw joint angle [rad]
         TIME=nan(N_sim),
+        # --- wall-clock cost per layer [s], one sample per invocation. Lists
+        # rather than arrays: the layers tick at different rates (ORCA ~30 Hz,
+        # MPC 10 Hz, footstep planner 1.25 Hz, WBC 300 Hz), so there is no
+        # common index. Consumed by eval_metrics._timing_stats.
+        TIMERS={k: [] for k in ('orca', 'mpc', 'footstep', 'wbc', 'sim',
+                                'perception')},
+        STEP_DUR=conf.step_dur,      # so the metrics module can smooth per step
     )
 
 
@@ -825,6 +873,8 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         np.zeros(2))                             # seed the buffer until the first step
     v_cmd_acc = np.zeros(2)                      # v_cmd sum since the last step
     v_cmd_n = 0                                  # ... and its sample count
+    t_goal_first = None                          # first time inside goal_tol (batch
+                                                 # early-stop; None = not there now)
     swing_frozen = False                         # touchdown detected this step
     T_frozen = None                              # swing pose held after touchdown
     T_cmd = None                                 # swing pose commanded this tick
@@ -841,8 +891,32 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     obstacle_topic = ('obstacles/perceived' if PEDESTRIAN_SENSOR_DATA
                       else 'obstacles/ground_truth')
     orca_node = ORCAVelocityNode(goal=ROBOT_GOAL, obstacle_topic=obstacle_topic,
-                                 radius=0.35, max_speed=1.5,
-                                 desired_speed=1.2, safety_margin=0.2)
+                                 radius=0.35, max_speed=MAX_SPEED,
+                                 desired_speed=DESIRED_SPEED,
+                                 safety_margin=SAFETY_MARGIN,
+                                 responsibility=ROBOT_RESPONSIBILITY)
+
+    # --- per-layer wall-clock instrumentation -------------------------------
+    # Wrapped from the outside rather than measured inside each module, so the
+    # controller code stays free of evaluation concerns and the numbers cover
+    # exactly the call the layer boundary makes.
+    def _timed(fn, key):
+        def wrapper(*a, **kw):
+            t0 = time.perf_counter()
+            try:
+                return fn(*a, **kw)
+            finally:
+                L.TIMERS[key].append(time.perf_counter() - t0)
+        return wrapper
+
+    orca_node.ctrl.compute_velocity = _timed(
+        orca_node.ctrl.compute_velocity, 'orca')
+    mpc.buildSolveOCP = _timed(mpc.buildSolveOCP, 'mpc')
+    reactive_planner.regenerate = _timed(reactive_planner.regenerate, 'footstep')
+    robot.update = _timed(robot.update, 'wbc')
+    simulator.step = _timed(simulator.step, 'sim')
+    robot.update_obstacles = _timed(robot.update_obstacles, 'perception')
+
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     executor.add_node(orca_node)
@@ -912,43 +986,75 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         # --- navigation logging ---
         if i >= 0:
             L.ROBOT_XY[i] = com[:2]
-            for j, (p, _, r) in enumerate(ped_states):
+
+            def _min_gap(states):
+                gaps = [np.hypot(*(com[:2] - np.asarray(p, float)[:2]))
+                        - ROBOT_RADIUS_PHYS - r for (p, _, r) in states]
+                return min(gaps) if gaps else np.nan
+
+            # ground truth, always: the safety metric must not depend on what the
+            # robot happened to see (in perception mode an undetected pedestrian
+            # would otherwise silently vanish from the collision statistics)
+            gt_states = crowd.states()
+            for j, (p, _, r) in enumerate(gt_states):
                 L.PED_XY[i, j] = np.asarray(p, dtype=float)[:2]
-            gaps = [np.hypot(*(com[:2] - np.asarray(p, float)[:2])) - ROBOT_RADIUS_PHYS - r
-                    for (p, _, r) in ped_states]
-            L.MIN_SEP[i] = min(gaps) if gaps else np.nan
+            L.MIN_SEP[i] = _min_gap(gt_states)
+            # the same gap as the robot believes it to be
+            L.MIN_SEP_PERC[i] = _min_gap(ped_states)
+            L.N_TRACKS[i] = len(ped_states)
             L.DIST_GOAL[i] = float(np.hypot(*(L.GOAL - com[:2])))
             L.VCMD[i] = v_cmd
             L.VPREF[i] = v_pref
 
+        # --- batch termination: stop once the run is decided ---------------
+        # A sweep pays for every simulated second, and nothing after the verdict
+        # informs any metric: a fallen robot never recovers, and a robot parked
+        # on its goal only accumulates idle samples. Interactive runs keep the
+        # full WALK_DURATION so the demo does not cut off mid-scene.
+        if OUT_DIR and EARLY_STOP and i >= 0:
+            if com[2] < 0.60:
+                print(f"[batch] fallen at t={t:.2f}s -- stopping", flush=True)
+                break
+            if L.DIST_GOAL[i] <= 0.3:
+                if t_goal_first is None:
+                    t_goal_first = t
+                elif t - t_goal_first > 1.0:
+                    print(f"[batch] goal held for 1 s (reached t="
+                          f"{t_goal_first:.2f}s) -- stopping", flush=True)
+                    break
+            else:
+                t_goal_first = None
+
         # debug overlay: green = v_cmd (drives the footsteps), blue = goal direction,
-        # red sphere = goal
-        arrows = [a for a in (
-            debug_viz.velocity_arrow(com[:2], v_pref, z=float(com[2]),
-                                     scale=ARROW_SCALE, rgba=(0.3, 0.5, 1.0, 0.6)),
-            debug_viz.velocity_arrow(com[:2], v_cmd, z=float(com[2]),
-                                     scale=ARROW_SCALE, rgba=(0.1, 0.9, 0.1, 1.0)),
-        ) if a is not None]
-        goal_marker = debug_viz.point_marker(nav.goal, z=0.15, radius=0.12,
-                                             rgba=(1.0, 0.2, 0.2, 1.0))
-        # orange foot-shaped box at the next planned footstep, fading blue/red
-        # boxes at the executed footstep history, violet spheres for the CoM
-        # trail. Colors are dark/saturated with an alpha floor so they stay
-        # readable on the light tiled floor (floor_ambience); the old white
-        # trail and near-zero history alphas washed out on it.
-        boxes = ([debug_viz.footstep_box(next_step, rgba=(1.0, 0.5, 0.0, 0.9))]
-                 if next_step is not None else [])
-        hist = robot.footstep_history
-        for age, fs in enumerate(reversed(hist)):
-            alpha = 0.2 + 0.55 * (1.0 - age / max(len(hist), 1))
-            color = ((0.05, 0.25, 0.95, alpha) if fs.side == Side.LEFT
-                     else (0.85, 0.10, 0.05, alpha))
-            boxes.append(debug_viz.footstep_box(fs, rgba=color))
-        points = [goal_marker]
-        points += [debug_viz.point_marker(p[:2], z=0.02, radius=0.02,
-                                          rgba=(0.55, 0.0, 0.75, 0.85))
-                   for p in robot.com_trail]
-        debug_viz.draw_scene(simulator, arrows=arrows, points=points, boxes=boxes)
+        # red sphere = goal. Purely visual, so it is skipped without a viewer --
+        # it costs a few hundred geoms per tick that nothing would ever draw.
+        if RENDER:
+            arrows = [a for a in (
+                debug_viz.velocity_arrow(com[:2], v_pref, z=float(com[2]),
+                                         scale=ARROW_SCALE, rgba=(0.3, 0.5, 1.0, 0.6)),
+                debug_viz.velocity_arrow(com[:2], v_cmd, z=float(com[2]),
+                                         scale=ARROW_SCALE, rgba=(0.1, 0.9, 0.1, 1.0)),
+            ) if a is not None]
+            goal_marker = debug_viz.point_marker(nav.goal, z=0.15, radius=0.12,
+                                                 rgba=(1.0, 0.2, 0.2, 1.0))
+            # orange foot-shaped box at the next planned footstep, fading blue/red
+            # boxes at the executed footstep history, violet spheres for the CoM
+            # trail. Colors are dark/saturated with an alpha floor so they stay
+            # readable on the light tiled floor (floor_ambience); the old white
+            # trail and near-zero history alphas washed out on it.
+            boxes = ([debug_viz.footstep_box(next_step, rgba=(1.0, 0.5, 0.0, 0.9))]
+                     if next_step is not None else [])
+            hist = robot.footstep_history
+            for age, fs in enumerate(reversed(hist)):
+                alpha = 0.2 + 0.55 * (1.0 - age / max(len(hist), 1))
+                color = ((0.05, 0.25, 0.95, alpha) if fs.side == Side.LEFT
+                         else (0.85, 0.10, 0.05, alpha))
+                boxes.append(debug_viz.footstep_box(fs, rgba=color))
+            points = [goal_marker]
+            points += [debug_viz.point_marker(p[:2], z=0.02, radius=0.02,
+                                              rgba=(0.55, 0.0, 0.75, 0.85))
+                       for p in robot.com_trail]
+            debug_viz.draw_scene(simulator, arrows=arrows, points=points, boxes=boxes)
 
         # --- step transition: pick/plan the next footstep, build swing spline ---
         if i >= 0 and i % conf.no_sim_per_step == 0:
@@ -1126,9 +1232,11 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
             robot.publish()
             # depth image + CameraInfo (front RGB-D): depth_image_proc's
             # point_cloud_xyz turns these into /camera/depth/points for RViz
-            # (ros2 launch bullet_sims depth_image_proc.launch.py)
-            robot.publish_depth_image()
-            if PEDESTRIAN_SENSOR_DATA:
+            # (ros2 launch bullet_sims depth_image_proc.launch.py). Nothing is
+            # subscribed during a batch run, and the render is not free.
+            if not OUT_DIR:
+                robot.publish_depth_image()
+            if PEDESTRIAN_SENSOR_DATA and not OUT_DIR:
                 # obstacle-estimate overlay (cyan) + ground-truth ghosts (grey)
                 robot.publish_obstacle_markers(
                     {p.name: dict(x=p.position[0], y=p.position[1], r=p.radius)
@@ -1159,27 +1267,51 @@ def _read_runtime_params():
             -p scenario:=crossing -p pedestrian_sensor_data:=true
     """
     global SCENARIO, PEDESTRIAN_SENSOR_DATA
+    global RENDER, SEED, N_PEDS, ROBOT_RESPONSIBILITY, PED_RESPONSIBILITY
+    global SAFETY_MARGIN, OUT_DIR, RUN_ID, WALK_DURATION, ROBOT_GOAL
+    global DESIRED_SPEED, MAX_SPEED
     node = rclpy.create_node("walking_params")
-    node.declare_parameter("scenario", SCENARIO)
-    node.declare_parameter("pedestrian_sensor_data", PEDESTRIAN_SENSOR_DATA)
-    SCENARIO = node.get_parameter("scenario").get_parameter_value().string_value
-    PEDESTRIAN_SENSOR_DATA = node.get_parameter(
-        "pedestrian_sensor_data").get_parameter_value().bool_value
+
+    def _p(name, default):
+        node.declare_parameter(name, default)
+        return node.get_parameter(name).value
+
+    SCENARIO = _p("scenario", SCENARIO)
+    PEDESTRIAN_SENSOR_DATA = _p("pedestrian_sensor_data", PEDESTRIAN_SENSOR_DATA)
+    RENDER = _p("render", RENDER)
+    SEED = int(_p("seed", SEED))
+    N_PEDS = int(_p("n_peds", N_PEDS))
+    ROBOT_RESPONSIBILITY = float(_p("robot_responsibility", ROBOT_RESPONSIBILITY))
+    PED_RESPONSIBILITY = float(_p("ped_responsibility", PED_RESPONSIBILITY))
+    SAFETY_MARGIN = float(_p("safety_margin", SAFETY_MARGIN))
+    DESIRED_SPEED = float(_p("desired_speed", DESIRED_SPEED))
+    MAX_SPEED = float(_p("max_speed", MAX_SPEED))
+    WALK_DURATION = float(_p("walk_duration", WALK_DURATION))
+    ROBOT_GOAL = (float(_p("goal_x", ROBOT_GOAL[0])),
+                  float(_p("goal_y", ROBOT_GOAL[1])))
+    OUT_DIR = _p("out_dir", OUT_DIR)
+    RUN_ID = _p("run_id", RUN_ID)
     node.destroy_node()
-    print(f"[walking] scenario='{SCENARIO}'  "
-          f"pedestrian_sensor_data={PEDESTRIAN_SENSOR_DATA}")
+    print(f"[walking] scenario='{SCENARIO}' seed={SEED} n_peds={N_PEDS} "
+          f"sensor={PEDESTRIAN_SENSOR_DATA} render={RENDER} "
+          f"resp_robot={ROBOT_RESPONSIBILITY} resp_ped={PED_RESPONSIBILITY} "
+          f"margin={SAFETY_MARGIN} goal={ROBOT_GOAL} dur={WALK_DURATION}"
+          + (f" -> {OUT_DIR}/{RUN_ID}" if OUT_DIR else ""))
 
 
 def main():
-    # ros2 run skips the __main__ block, so all setup happens here
+    # ros2 run skips the __main__ block, so all setup happens here.
+    # Parameters are read first: RENDER decides whether the simulator opens a
+    # viewer at all, so it has to be known before the simulator is built.
+    if not rclpy.ok():
+        rclpy.init()
+    _read_runtime_params()
+
     simulator = _setup_simulator()
 
     setup_floor_ambience(simulator._spec)
     simulator._dirty = True
     simulator._ensure_compiled()
-
-    # runtime parameters (scenario, sensor vs ground truth) -> module globals
-    _read_runtime_params()
 
     # must land on conf before _create_robot builds the TSIDWrapper: the AM task is
     # constructed with its weight and never re-weighted afterwards
@@ -1217,14 +1349,34 @@ def main():
         N_sim = int(round(no_steps * conf.step_dur / conf.dt))
 
     # run the simulation, then plot
+    t_wall = time.perf_counter()
     L = _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref,
                   com_start, com_target, N_pre, N_sim,
                   planner=planner, no_steps=no_steps)
-    _plot_navigation(L)
+    t_wall = time.perf_counter() - t_wall
 
-    _plot_heading(L)
-
-    _plot_results(L)
+    if OUT_DIR:
+        # batch mode: metrics to disk, no plots (a sweep runs headless and
+        # aggregates afterwards; matplotlib windows would block it)
+        from bullet_sims import eval_metrics
+        meta = dict(run_id=RUN_ID, scenario=SCENARIO, seed=SEED, n_peds=N_PEDS,
+                    sensor=PEDESTRIAN_SENSOR_DATA,
+                    robot_responsibility=ROBOT_RESPONSIBILITY,
+                    ped_responsibility=PED_RESPONSIBILITY,
+                    safety_margin=SAFETY_MARGIN,
+                    desired_speed=DESIRED_SPEED, max_speed=MAX_SPEED,
+                    goal_x=ROBOT_GOAL[0], goal_y=ROBOT_GOAL[1],
+                    walk_duration=WALK_DURATION, wall_time_s=t_wall)
+        s = eval_metrics.dump(L, meta, OUT_DIR, RUN_ID)
+        print(f"[batch] {RUN_ID}: success={s['success']} "
+              f"collision-free={s['success_collision_free']} "
+              f"fell={s['fell']} min_sep={s['min_sep_m']:.3f} "
+              f"t_goal={s['t_goal_s']} path_ratio={s['path_ratio']:.3f} "
+              f"({t_wall:.1f}s wall)")
+    else:
+        _plot_navigation(L)
+        _plot_heading(L)
+        _plot_results(L)
 
     if rclpy.ok():
         rclpy.shutdown()

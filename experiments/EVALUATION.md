@@ -453,6 +453,51 @@ that cannot — and it is too slow to protect itself in either case if the crowd
 actively ignores it.** The shipped 0.3 sits comfortably on the safe side of the
 knee.
 
+### Q-H — the reciprocity plane  → `figures/qh_reciprocity.png`
+
+Q-D swept the robot's share against its safety margin; Q-G2 swept the crowd's
+share alone. Q-H crosses them: `robot_responsibility × ped_responsibility` on
+random ×8, 200 runs. In reference ORCA a pair's shares sum to ~1.0 for a fully
+resolved encounter, and the shipped default sums to only 0.2 + 0.3 = 0.5 — so
+does the *total* matter, or only who provides it?
+
+| robot ↓ / ped → | 0.0 | 0.1 | 0.2 | 0.3 | 0.5 |
+|---|---|---|---|---|---|
+| **0.0** | 30 % | 80 % | 100 % | 90 % | 80 % |
+| **0.2** | 60 % | 100 % | 100 % | 100 % ★ | 100 % |
+| **0.5** | 60 % | 100 % | 100 % | 100 % | 100 % |
+| **1.0** | 60 % | 100 % | 100 % | 100 % | 100 % |
+
+(collision-free success; ★ = shipped default. Clearance is 0.35 m in every cell
+except the ped = 0 column, where it degrades to between +0.21 m at robot 1.0 and
+−0.34 m at robot 0.0.)
+
+**The failure is a single column, not a diagonal — and that is the answer.**
+Three readings:
+
+* **The crowd's share dominates.** Every cell with `ped ≥ 0.1` is ~100 %,
+  whatever the robot does. The knee is at ped = 0.1 in *every* row.
+* **The robot's share is a weak floor, not a substitute.** In the fully-non-
+  yielding column (ped = 0) raising the robot from 0.0 to 0.2 lifts success from
+  30 % to 60 % and clearance from −0.34 m to +0.17 m — real, but it *saturates*:
+  robot 0.5 and robot 1.0 are also stuck at 60 %. The robot cannot reach 100 %
+  on its own no matter how much responsibility it takes, because it is out-run
+  (Q-B: 0.4 m/s, 1.57 s lag, vs a 1.3 m/s crowd).
+* **The reciprocity total does *not* predict success.** If it did, the four
+  robot-share curves in panel 3 would collapse onto one line of success-vs-total.
+  They do not — they are shifted, and each has its knee at the same *pedestrian*
+  share, not the same total. A total of 1.0 gives 60 % (robot 1.0 + ped 0.0) or
+  100 % (robot 0.5 + ped 0.5); the split is what matters, not the sum. ORCA's
+  symmetric-reciprocity intuition breaks on this system precisely because the
+  two agents are not symmetric: the crowd acts instantly, the robot two steps
+  late.
+
+The one genuinely bad cell is (robot 0.0, ped 0.0) at 30 % — nobody avoids
+anyone. The shipped (0.2, 0.3) is deep in the safe interior; if anything Q-H says
+the robot's own 0.2 is barely doing anything the crowd's 0.3 was not already
+handling, and could be raised for a little insurance in the ped → 0 direction at
+no cost elsewhere.
+
 ---
 
 ## 4. The story in one paragraph

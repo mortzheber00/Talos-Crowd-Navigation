@@ -2,17 +2,26 @@
 import base64, os, html
 
 WEBP = "/home/sebas/.claude/jobs/73529903/tmp/webp"
+GIFS = "/home/sebas/Documents/university/TUM/Master/SS26/LR/talos_crowd_navigation/.claude/worktrees/evaluation/experiments/figures/gifs"
 OUT = "/home/sebas/.claude/jobs/73529903/deck.html"
 
 def img(name):
     with open(os.path.join(WEBP, name + ".webp"), "rb") as f:
         return "data:image/webp;base64," + base64.b64encode(f.read()).decode()
 
+def gif(name):
+    with open(os.path.join(GIFS, "nav_" + name + ".gif"), "rb") as f:
+        return "data:image/gif;base64," + base64.b64encode(f.read()).decode()
+
+GIF_SCENS = [("empty", "Empty (control)"), ("head_on", "Head-on"),
+             ("crossing", "Crossing"), ("corridor", "Corridor"),
+             ("circle", "Circle"), ("random", "Random crowd")]
+
 SLIDES = [
  dict(n=1, arc="setup", qid="", head="Crowd navigation for a Talos humanoid",
       sub="An evaluation of what the ORCA-on-a-biped stack actually does",
       body="""<p>MuJoCo · Talos · ORCA crowd · LIP-MPC + TSID walking controller.
-      <strong>620+ simulation runs</strong> across eight questions.</p>
+      <strong>800+ simulation runs</strong> across eight questions.</p>
       <p class="muted">Lara Heidtmann · Florian Bohnes · Sebastián Serna · Moritz Heber · Nicolas Guenther</p>""",
       fig=None, take=None),
 
@@ -51,16 +60,18 @@ SLIDES = [
       <tr><td class="qid">Q-E</td><td>At what crowd density does it break?</td><td class="muted">limits</td></tr>
       <tr><td class="qid">Q-F</td><td>What does onboard perception cost vs ground truth?</td><td class="muted">ablation</td></tr>
       <tr class="added"><td class="qid">Q-G</td><td>Is the robot avoiding the crowd, or the crowd avoiding the robot?</td><td class="muted">attribution</td></tr>
+      <tr class="added"><td class="qid">Q-G2</td><td>How much crowd cooperation does it minimally need?</td><td class="muted">dose-response</td></tr>
+      <tr class="added"><td class="qid">Q-H</td><td>Robot's share vs the crowd's — whose avoidance is it?</td><td class="muted">reciprocity</td></tr>
       </tbody></table>
-      <p class="note">Q-G was added <em>after</em> Q-C came back at 100 % everywhere. A result that
-      uniform is a reason to check the setup, not to celebrate.</p>""",
+      <p class="note">Q-G and its follow-ups (highlighted) were added <em>after</em> Q-C came back at 100 %
+      everywhere. A result that uniform is a reason to check the setup, not to celebrate.</p>""",
       fig=None, take=None),
 
  dict(n=5, arc="setup", qid="method", head="How it was measured",
       sub="Headless sweeps, 10 seeds per condition, metrics to disk",
       body="""<div class="split">
       <div><h4>Setup</h4><ul>
-      <li>620+ runs, headless, 10 at a time</li>
+      <li>800+ runs, headless, 10 at a time</li>
       <li>each run its own <code>ROS_DOMAIN_ID</code> — without it, parallel runs share a DDS
       domain and one run's ORCA steers on another's odometry</li>
       <li>10 seeds per condition; simulator otherwise deterministic (verified)</li>
@@ -81,7 +92,16 @@ SLIDES = [
             "every crowd — path ratio never exceeds 1.06. And clearance is 0.348 m in every scenario, "
             "identical to three decimals.")),
 
- dict(n=7, arc="the puzzle", qid="Q-A", head="The avoidance planner is free",
+ dict(n=7, arc="the puzzle", qid="Q-C", head="The same six, moving",
+      sub="Synchronised top-down runs — all reset together",
+      body="""<p>The trajectories above, animated. Robot in <span style="color:#0d7a4f;
+      font-weight:600">green</span>, pedestrians in grey, goal the red star. Every clip runs on the same
+      18 s clock (the slowest scenario's finish), so they loop in lockstep.</p>""",
+      gifs=True,
+      take=("ok", "Watch the robot: it barely deviates in any of them. That is the observation Q-G is "
+            "about to explain.")),
+
+ dict(n=8, arc="the puzzle", qid="Q-A", head="The avoidance planner is free",
       sub="Measured one run at a time on an idle machine",
       body="""<p>The whole navigation stack — ORCA + footstep planner + MPC — is <b class="num">≈13 ms</b>
       p95 against the project's 50 ms bar. <strong>Criterion met comfortably.</strong></p>
@@ -106,7 +126,8 @@ SLIDES = [
       magnitude and is what saturates.</p>""",
       fig="qb_command_tracking",
       take=("warn", "Not a tracking bug — a <strong>specification mismatch</strong>. ORCA is asking for a "
-            "speed that does not exist on this robot. Remember the 2-step lag; it comes back on slide 11.")),
+            "speed that does not exist on this robot. Remember the 2-step lag; it returns once we remove "
+            "the crowd's cooperation.")),
 
  dict(n=9, arc="the puzzle", qid="Q-B2", head="Asking for more speed delivers nothing",
       sub="80 runs sweeping ORCA's speed setpoint",
@@ -179,6 +200,23 @@ SLIDES = [
             "see it</em>, and useless against one that cannot. Q-G's 0 % is the blind extreme, not the "
             "whole story. The shipped 0.3 sits safely past the knee.")),
 
+ dict(n=13, arc="the resolution", qid="Q-H", head="Whose share is it — robot or crowd?",
+      sub="200 runs crossing the robot's share with the crowd's",
+      body="""<p>Reference ORCA expects a pair's shares to sum to ≈1.0; the shipped default sums to only
+      0.2 + 0.3 = 0.5. So does the <em>total</em> matter, or <em>who</em> provides it?</p>
+      <p><strong>The failure is a single column, not a diagonal.</strong> Every cell where the crowd takes
+      even 10 % is 100 %. The robot's own share is a weak floor: in the fully-non-yielding column it lifts
+      success from 30 % to 60 %, but <em>saturates</em> — robot 0.5 and 1.0 are also stuck at 60 %,
+      because it is out-run and cannot reach 100 % alone.</p>
+      <p class="note">Panel 3 is the test: if the reciprocity <em>total</em> predicted success the four
+      curves would collapse onto one. They don't — each has its knee at the same <em>pedestrian</em>
+      share, not the same total. A total of 1.0 gives 60 % (robot 1.0 + ped 0.0) or 100 % (robot 0.5 +
+      ped 0.5). The split matters, not the sum — because the two agents are not symmetric.</p>""",
+      fig="qh_reciprocity",
+      take=("ok", "The shipped (0.2, 0.3) sits deep in the safe interior. Q-H says the robot's 0.2 is "
+            "barely adding to what the crowd's 0.3 already handles — it could be raised for cheap "
+            "insurance toward the non-yielding corner.")),
+
  dict(n=14, arc="the resolution", qid="Q-F", head="Perception costs the goal, provably not safety",
       sub="60 runs, paired by scenario and seed",
       body="""<p>Collision-free success falls from 100 % to <b class="num bad">10 %</b> and time-to-goal
@@ -221,6 +259,10 @@ else:
       fig=None, take=None),
 ]
 
+# number slides by position, so inserting one never desyncs the badges/nav
+for _i, _s in enumerate(SLIDES):
+    _s["n"] = _i + 1
+
 def slide_html(s):
     parts = [f'<section class="slide" id="s{s["n"]}">']
     parts.append('<div class="rail"><span class="arc">%s</span><span class="num-badge">%02d</span></div>'
@@ -231,6 +273,11 @@ def slide_html(s):
     parts.append(f'<h2>{s["head"]}</h2>')
     parts.append(f'<p class="sub">{s["sub"]}</p>')
     parts.append(f'<div class="body">{s["body"]}</div>')
+    if s.get("gifs"):
+        cells = "".join(
+            f'<figure class="gcell"><img src="{gif(scen)}" alt="{html.escape(title)}">'
+            f'</figure>' for scen, title in GIF_SCENS)
+        parts.append(f'<div class="gifgrid">{cells}</div>')
     for key in ("fig", "fig2"):
         if s.get(key):
             parts.append(f'<figure><img src="{img(s[key])}" alt="{html.escape(s["qid"] or s["head"])} figure" loading="lazy"></figure>')
@@ -339,6 +386,11 @@ table.data tr.best td {{ background:color-mix(in srgb, var(--good) 10%, transpar
 figure {{ margin:20px 0 0; background:var(--plate); border:1px solid var(--rule); border-radius:8px;
   padding:9px; overflow-x:auto; }}
 figure img {{ display:block; width:100%; max-width:100%; height:auto; border-radius:3px; }}
+.gifgrid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:18px; }}
+.gifgrid .gcell {{ margin:0; padding:6px; background:var(--plate); border:1px solid var(--rule);
+  border-radius:8px; overflow:hidden; }}
+.gifgrid .gcell img {{ width:100%; height:auto; display:block; border-radius:3px; }}
+@media (max-width:720px) {{ .gifgrid {{ grid-template-columns:repeat(2,1fr); }} }}
 
 .take {{ margin-top:20px; padding:13px 17px; border-radius:7px; font-size:15px;
   border-left:3px solid var(--accent); background:color-mix(in srgb, var(--accent) 8%, transparent); }}
@@ -369,7 +421,7 @@ html {{ scroll-behavior:smooth; }}
 
 <div class="wrap">
 {chr(10).join(slide_html(s) for s in SLIDES)}
-<footer>620+ simulation runs · MuJoCo + ORCA + LIP-MPC/TSID · figures and tables regenerate from
+<footer>800+ simulation runs · MuJoCo + ORCA + LIP-MPC/TSID · figures and tables regenerate from
 <code>experiments/analyze.py</code></footer>
 </div>
 """

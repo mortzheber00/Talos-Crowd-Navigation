@@ -13,6 +13,10 @@ def gif(name):
     with open(os.path.join(GIFS, "nav_" + name + ".gif"), "rb") as f:
         return "data:image/gif;base64," + base64.b64encode(f.read()).decode()
 
+def gif_raw(fname):
+    with open(os.path.join(GIFS, fname), "rb") as f:
+        return "data:image/gif;base64," + base64.b64encode(f.read()).decode()
+
 GIF_SCENS = [("empty", "Empty (control)"), ("head_on", "Head-on"),
              ("crossing", "Crossing"), ("corridor", "Corridor"),
              ("circle", "Circle"), ("random", "Random crowd")]
@@ -80,8 +84,10 @@ SLIDES = [
       <li><strong>Clearance is always ground truth</strong>, never what the robot perceived —
       otherwise an undetected pedestrian silently vanishes from the safety statistics.</li>
       <li><strong>Samples after a fall are excluded</strong> from collision counts: a collapsed
-      robot drifting into someone is not an avoidance failure.</li></ul></div></div>""",
-      fig=None, take=None),
+      robot drifting into someone is not an avoidance failure.</li></ul></div></div>
+      <p style="margin-top:16px">Every one of the 827 runs, robot path overlaid and coloured by outcome —
+      the whole evaluation in one frame:</p>""",
+      ensemble=True, fig=None, take=None),
 
  dict(n=6, arc="the puzzle", qid="Q-C", head="It works. Every criterion, met.",
       sub="53 runs · six scenarios · an empty-world control",
@@ -278,6 +284,9 @@ def slide_html(s):
             f'<figure class="gcell"><img src="{gif(scen)}" alt="{html.escape(title)}">'
             f'</figure>' for scen, title in GIF_SCENS)
         parts.append(f'<div class="gifgrid">{cells}</div>')
+    if s.get("ensemble"):
+        parts.append(f'<figure><img src="{gif_raw("ensemble_all.gif")}" '
+                     f'alt="827 runs overlaid, coloured by outcome"></figure>')
     for key in ("fig", "fig2"):
         if s.get(key):
             parts.append(f'<figure><img src="{img(s[key])}" alt="{html.escape(s["qid"] or s["head"])} figure" loading="lazy"></figure>')

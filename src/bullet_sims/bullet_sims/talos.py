@@ -383,6 +383,38 @@ class Talos:
             [0.0, 0.0, 1.0]
         ], dtype=np.float64)
 
+    @staticmethod
+    def _front_arc_estimate(xy, cam_xy):
+        """Estimate a cylinder's ground-plane (center, radius) from the front
+        arc a *single* camera sees.
+
+        ``xy`` are ground-projected surface points from ONE camera (Nx2) and
+        ``cam_xy`` is THAT camera's mount point. A camera only sees the front
+        arc, whose centroid sits ~2r/pi in front of the true axis along the
+        viewing ray; estimate r from the lateral chord (immune to that bias),
+        then push the centroid back onto the axis. Returns ``(center(2),
+        r_radius)`` where ``r_radius`` already covers the points actually seen.
+
+        Must be called per camera: merging points from cameras at different
+        yaw angles violates the single-front-arc assumption (the combined set
+        spans a wider arc than any one viewpoint), which places ``center`` off
+        the axis and makes the coverage distance below explode -- the source
+        of the radius inflation seen at camera seams.
+        """
+        centroid = xy.mean(axis=0)
+        ray = centroid - cam_xy
+        ray /= max(np.linalg.norm(ray), 1e-9)
+        lateral = xy @ np.array([-ray[1], ray[0]])
+        # robust chord + coverage via percentiles, not raw min/max: when an
+        # occluder splits the mask into a crescent/fragment, a few stray points
+        # sit far from the true axis and a raw max would blow the radius up.
+        r_est = 0.5 * (np.percentile(lateral, 97.5) - np.percentile(lateral, 2.5))
+        center = centroid + (2.0 / np.pi) * r_est * ray
+        # within one front arc the farthest point is ~r from the axis, so this
+        # stays bounded (unlike the same measure on a merged multi-view cloud)
+        cover = float(np.percentile(np.linalg.norm(xy - center, axis=1), 97.5))
+        return center, max(r_est, cover)
+
     def _compute_camera_intrinsics(self):
         """Intrinsic (K), projection (P) and distortion (D) parameters of the
         front RGB-D camera, for the ROS CameraInfo publisher."""
@@ -527,14 +559,17 @@ class Talos:
                     for name in self._obstacle_geom_names}
 
         # --- gather world-frame ground points per geom from every camera ---
-        pts = {name: [] for name in geom_ids}    # world-xy arrays
+        # Keep each camera's contribution SEPARATE (points + that camera's own
+        # mount point + FOV-clip flag): the front-arc estimate below is only
+        # valid per single viewpoint, so points from cameras at different yaw
+        # angles must not be pooled before estimation.
+        pts = {name: [] for name in geom_ids}    # per-camera world-xy arrays
+        cams_xy = {name: [] for name in geom_ids}  # that camera's mount (ground)
         clip = {name: [] for name in geom_ids}   # FOV-clipped in that camera?
-        cam_xy = None                            # shared mount point (ground)
         for cam in self._percep_cams:
             depth, seg = self.sim.get_depth_and_seg_image(invalid_to=np.nan,
                                                           camera=cam)
             cam_pos, R_wc = self.sim.get_camera_pose(camera=cam)
-            cam_xy = cam_pos[:2]
             # MuJoCo cameras look along local -Z with +Y up; the pinhole
             # equations below use the ROS optical convention (+Z forward,
             # +Y down), so flip the Y and Z axes of the camera rotation.
@@ -556,6 +591,7 @@ class Talos:
                 Y = (v_pix - cy) * Z / fy            # +Y down
                 pts_w = (R_w_opt @ np.vstack((X, Y, Z))).T + cam_pos
                 pts[name].append(pts_w[:, :2])       # ground-plane projection
+                cams_xy[name].append(cam_pos[:2].copy())
                 clip[name].append(u_pix.min() == 0
                                   or u_pix.max() == depth.shape[1] - 1)
 
@@ -577,36 +613,64 @@ class Talos:
                         prev['vx'] = prev['vy'] = 0.0
                 continue
 
-            xy = np.vstack(pts[name])
-
-            centroid = xy.mean(axis=0)
-            # The cameras only see the front arc of the cylinder, whose
-            # centroid sits ~2r/pi in front of the true axis. Estimate r from
-            # the lateral chord (immune to that bias), then push the center
-            # away from the mount point along the viewing ray.
-            ray = centroid - cam_xy
-            ray /= max(np.linalg.norm(ray), 1e-9)
-            lateral = xy @ np.array([-ray[1], ray[0]])
-            r_est = 0.5 * (lateral.max() - lateral.min())
-            center = centroid + (2.0 / np.pi) * r_est * ray
-            # 10% safety padding on top of whatever the points actually cover
-            radius = 1.10 * max(r_est,
-                                float(np.max(np.linalg.norm(xy - center, axis=1))))
-            # Partial visibility makes the chord underestimate r -- and an
-            # underestimated radius is unsafe for ORCA. Two guards:
-            #  * every contributing mask touches its left/right image border
+            # Estimate (center, radius) PER camera, where the single-front-arc
+            # model holds, then fuse -- never pool points across viewpoints
+            # first (that inflates the radius at camera seams). Two per-view
+            # filters keep a bad view from driving the fit:
+            #  * too-thin sliver (< the per-camera minimum) -> skip;
+            #  * FOV border-clipped arc -> the chord is cut off, so its center
+            #    and radius are unreliable; skip it as long as some clean
+            #    (unclipped, non-sliver) view remains. This is the seam case
+            #    clip=[True, False]: use only the camera that sees the whole arc.
+            # If nothing clean survives (all slivers or all clipped), fall back
+            # to the pooled points so a split-but-visible track still gets an
+            # estimate.
+            has_clean = any((not cl) and len(p) >= self.MIN_OBSTACLE_PIXELS
+                            for p, cl in zip(pts[name], clip[name]))
+            centers, radii, weights = [], [], []
+            for p, cxy, cl in zip(pts[name], cams_xy[name], clip[name]):
+                if len(p) < self.MIN_OBSTACLE_PIXELS:
+                    continue
+                if has_clean and cl:
+                    continue
+                c, r = self._front_arc_estimate(p, cxy)
+                centers.append(c)
+                radii.append(r)
+                weights.append(len(p))
+            if centers:
+                w = np.asarray(weights, dtype=float)
+                w /= w.sum()
+                center = (np.asarray(centers) * w[:, None]).sum(axis=0)
+                # each per-view radius is bounded ~r, so the max across views
+                # is safe (never under-estimates) without inflating
+                r_cover = max(radii)
+            else:
+                xy = np.vstack(pts[name])
+                center, r_cover = self._front_arc_estimate(
+                    xy, cams_xy[name][int(np.argmax([len(p) for p in pts[name]]))])
+            # 15% safety padding on top of whatever the points actually cover
+            # (the percentile coverage above trims the outermost points, so this
+            # keeps a healthy margin over the true radius for a well-seen agent)
+            radius = 1.15 * r_cover
+            # A pedestrian is a rigid body: its true radius is constant, so any
+            # large frame-to-frame change is measurement error. Two guards:
+            #  * if every contributing mask touches its left/right image border
             #    (adjacent cameras overlap at the seams, so a genuinely
-            #    complete arc is never border-clipped in ALL views):
-            #    hold the previous radius outright;
-            #  * otherwise limit shrinking to 1% per frame, so a sliver left
-            #    by a passing occluder cannot collapse the radius before the
-            #    mask drops below MIN_OBSTACLE_PIXELS (-> stale hold). A rigid
-            #    agent's radius never genuinely shrinks that fast.
+            #    complete arc is never border-clipped in ALL views) the chord is
+            #    cut off and can only under-estimate: hold, don't shrink;
+            #  * otherwise clamp the change to +/-1% per frame. Symmetric on
+            #    purpose: a passing occluder that leaves a thin sliver can make
+            #    the single-frame estimate collapse OR spike (an occluder
+            #    fragment's stray points survive even a robust percentile), and
+            #    neither should move the radius before the mask drops below
+            #    MIN_OBSTACLE_PIXELS (-> stale hold). Legitimate change (an agent
+            #    resolving as it nears) is gradual and tracks fine at 1%/frame.
             if prev is not None:
                 if all(clip[name]):
                     radius = max(radius, prev['r'])
                 else:
-                    radius = max(radius, 0.99 * prev['r'])
+                    radius = float(np.clip(radius,
+                                           0.99 * prev['r'], 1.01 * prev['r']))
 
             if prev is None or dt is None or dt <= 0.0:
                 vx = vy = 0.0                        # first sighting: EMA starts next frame

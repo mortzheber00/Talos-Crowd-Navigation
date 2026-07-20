@@ -212,6 +212,30 @@ def qs_stress():
     return runs
 
 
+def qh_hard():
+    """Q-H rerun on a crowd dense enough that the plane is not saturated.
+
+    Q-H at random x8 was 100% in 19 of 20 cells -- no gradient to read. The
+    stress calibration (qs_stress) showed why adding bodies alone does not fix
+    that: from 8 to 32 pedestrians the collision rate stays at zero and only the
+    effort rises (time to goal 10 -> 23 s, path ratio up to 1.7). Crowding costs
+    time, not safety, while the crowd still yields. Failures appear only at 48.
+
+    So the hard point is 48 pedestrians, and the gradient has to come from
+    crossing that with the cooperation axis -- density alone cannot produce it.
+    Same 10x10 m extent as every other sweep, so only the crowd size changed.
+    """
+    runs = []
+    for rr in (0.0, 0.2, 0.5, 1.0):
+        for pr in (0.0, 0.1, 0.2, 0.3, 0.5):
+            for seed in SEEDS:
+                runs.append(_base(scenario="random", n_peds=48, crowd_extent=5.0,
+                                  seed=seed, robot_responsibility=rr,
+                                  ped_responsibility=pr,
+                                  run_id=f"qhh_r{rr}_p{pr}_s{seed}"))
+    return runs
+
+
 def qh_reciprocity():
     """Q-H: the reciprocity plane -- robot share x crowd share.
 
@@ -304,6 +328,7 @@ EXPERIMENTS = {
     "qg2_ped_responsibility": qg2_ped_responsibility,
     "qh_reciprocity": qh_reciprocity,
     "qs_stress": qs_stress,
+    "qh_hard": qh_hard,
     "qc_scenarios": qc_scenarios,
     "qd_responsibility": qd_responsibility,
     "qe_density": qe_density,

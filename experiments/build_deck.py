@@ -89,6 +89,72 @@ SLIDES = [
       the whole evaluation in one frame:</p>""",
       ensemble=True, fig=None, take=None),
 
+ dict(n=6, arc="setup", qid="method", head="Every experiment, every setting",
+      sub="833 runs · 11 sweeps · one variable at a time",
+      body="""<h4>The baseline — held fixed unless a row below says otherwise</h4>
+      <div class="tablewrap"><table class="data cfg"><tbody>
+      <tr><td><code>scenario</code></td><td class="num">random</td>
+          <td><code>n_peds</code></td><td class="num">8</td>
+          <td><code>goal</code></td><td class="num">(4, 0) m</td></tr>
+      <tr><td><code>robot_responsibility</code></td><td class="num">0.2</td>
+          <td><code>ped_responsibility</code></td><td class="num">0.3</td>
+          <td><code>safety_margin</code></td><td class="num">0.2 m</td></tr>
+      <tr><td><code>desired_speed</code></td><td class="num">1.2 m/s</td>
+          <td><code>max_speed</code></td><td class="num">1.5 m/s</td>
+          <td><code>walk_duration</code></td><td class="num">45 s</td></tr>
+      <tr><td><code>crowd_avoids_robot</code></td><td class="num">true</td>
+          <td><code>pedestrian_sensor_data</code></td><td class="num">false (ground truth)</td>
+          <td><code>render</code></td><td class="num">false</td></tr>
+      </tbody></table></div>
+
+      <h4 style="margin-top:18px">The sweeps</h4>
+      <div class="tablewrap"><table class="data matrix"><thead><tr>
+      <th>Q</th><th>sweep</th><th>what varied</th><th>values</th><th>scenario × peds</th>
+      <th>seeds</th><th>runs</th></tr></thead><tbody>
+      <tr><td class="qid">C</td><td><code>qc_scenarios</code></td><td>scenario</td>
+          <td class="num">empty · head_on · crossing · corridor · circle · random</td>
+          <td class="num">all six × 8</td><td class="num">10*</td><td class="num">53</td></tr>
+      <tr><td class="qid">A</td><td><code>qa_solo</code></td><td>sensor <span class="muted">(1 worker, idle machine)</span></td>
+          <td class="num">false · true</td><td class="num">random × 12</td>
+          <td class="num">2</td><td class="num">4</td></tr>
+      <tr><td class="qid">A·B</td><td><code>qab_timing</code></td><td>sensor × scenario</td>
+          <td class="num">false·true</td><td class="num">random, crossing × 12</td>
+          <td class="num">5</td><td class="num">20</td></tr>
+      <tr><td class="qid">B2</td><td><code>qb2_speed</code></td><td>desired_speed <span class="muted">(max_speed = 1.25×)</span></td>
+          <td class="num">0.30 · 0.45 · 0.60 · 1.20</td><td class="num">random, crossing × 8</td>
+          <td class="num">10</td><td class="num">80</td></tr>
+      <tr><td class="qid">D</td><td><code>qd_responsibility</code></td><td>robot_responsibility × safety_margin</td>
+          <td class="num">{0, 0.2, 0.5, 1.0} × {0.1, 0.2, 0.4}</td><td class="num">random × 8</td>
+          <td class="num">10</td><td class="num">110</td></tr>
+      <tr><td class="qid">E</td><td><code>qe_density</code></td><td>n_peds</td>
+          <td class="num">0 · 2 · 4 · 8 · 12 · 16 · 24</td><td class="num">random</td>
+          <td class="num">10</td><td class="num">70</td></tr>
+      <tr><td class="qid">F</td><td><code>qf_perception</code></td><td>pedestrian_sensor_data × scenario</td>
+          <td class="num">false · true</td><td class="num">head_on, crossing, random × 8</td>
+          <td class="num">10</td><td class="num">60</td></tr>
+      <tr class="added"><td class="qid">G</td><td><code>qg_cooperation</code></td><td>crowd_avoids_robot × condition</td>
+          <td class="num">true · false</td>
+          <td class="num">head_on×2, crossing×4, random×8, random×16</td>
+          <td class="num">10</td><td class="num">80</td></tr>
+      <tr class="added"><td class="qid">G2</td><td><code>qg2_ped_responsibility</code></td><td>ped_responsibility</td>
+          <td class="num">0.0 · 0.1 · 0.2 · 0.3 · 0.5</td>
+          <td class="num">head_on×2, crossing×4, random×8</td><td class="num">10</td><td class="num">150</td></tr>
+      <tr class="added"><td class="qid">H</td><td><code>qh_reciprocity</code></td><td>robot_responsibility × ped_responsibility</td>
+          <td class="num">{0, 0.2, 0.5, 1.0} × {0, 0.1, 0.2, 0.3, 0.5}</td>
+          <td class="num">random × 8</td><td class="num">10</td><td class="num">200</td></tr>
+      <tr><td class="qid">—</td><td><code>gif_runs</code></td><td>scenario <span class="muted">(18 s, early_stop off)</span></td>
+          <td class="num">all six</td><td class="num">all six × 8</td><td class="num">1</td><td class="num">6</td></tr>
+      </tbody></table></div>
+      <p class="note">* <code>empty</code> has no crowd, so its seed reaches nothing and every run is
+      bit-identical — 3 runs as a determinism check rather than 10 as a statistic.<br>
+      <strong>Breadth once, depth on one.</strong> Q-C establishes the system across all six scenarios;
+      the parameter sweeps then hold scenario at <code>random × 8</code> so a cell-to-cell difference is
+      attributable to the parameter, not the scene. Q-H across all six would have been 1 200 runs.<br>
+      <strong>791 of 833 runs use ground truth.</strong> Perception is an ablation (Q-F, Q-A), deliberately
+      held out of the planner sweeps so a tracker bug could not be mistaken for a planner result — which
+      mattered, since the radius estimator turned out to ratchet to 3–15 m.</p>""",
+      fig=None, take=None),
+
  dict(n=6, arc="the puzzle", qid="Q-C", head="It works. Every criterion, met.",
       sub="53 runs · six scenarios · an empty-world control",
       body="""<p>100 % collision-free everywhere, zero falls, ≥5 moving pedestrians, planning far
@@ -391,6 +457,20 @@ table.data td, table.data th {{ padding:7px 14px 7px 0; border-bottom:1px solid 
 table.data th {{ font-size:11.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink2); font-weight:600; }}
 table.data tr.best td {{ background:color-mix(in srgb, var(--good) 10%, transparent); font-weight:600; }}
 .tablewrap {{ overflow-x:auto; }}
+/* dense reference tables: the methodology matrix carries a lot of small facts,
+   so it gets tighter rows and a smaller face than the result tables */
+table.cfg td {{ padding:5px 10px 5px 0; font-size:13.5px; border-bottom:1px solid var(--rule); }}
+table.cfg td:nth-child(odd) {{ color:var(--ink2); }}
+table.matrix {{ font-size:12.5px; }}
+table.matrix th, table.matrix td {{ padding:6px 10px 6px 0; vertical-align:top;
+  border-bottom:1px solid var(--rule); }}
+table.matrix th {{ font-size:10.5px; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--ink2); white-space:nowrap; }}
+table.matrix .qid {{ font-family:var(--mono); color:var(--accent); font-weight:600;
+  white-space:nowrap; }}
+table.matrix tr.added .qid {{ color:var(--alert); }}
+table.matrix tr.added {{ background:color-mix(in srgb, var(--alert) 5%, transparent); }}
+table.matrix code {{ font-size:11.5px; background:none; padding:0; color:var(--ink); }}
 
 figure {{ margin:20px 0 0; background:var(--plate); border:1px solid var(--rule); border-radius:8px;
   padding:9px; overflow-x:auto; }}

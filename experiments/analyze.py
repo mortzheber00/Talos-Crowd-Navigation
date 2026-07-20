@@ -905,8 +905,95 @@ def qg2():
     print(t.to_string())
 
 
+def qh():
+    """Q-H: the reciprocity plane, robot share x crowd share."""
+    df = _load("qh_reciprocity")
+    if df is None:
+        return
+    rrs = sorted(df["robot_responsibility"].unique())          # rows (y)
+    prs = sorted(df["ped_responsibility"].unique())            # cols (x)
+
+    def grid(fn):
+        M = np.full((len(rrs), len(prs)), np.nan)
+        for i, rr in enumerate(rrs):
+            for j, pr in enumerate(prs):
+                sel = df[(df.robot_responsibility == rr) &
+                         (df.ped_responsibility == pr)]
+                if len(sel):
+                    M[i, j] = fn(sel)
+        return M
+
+    CF = grid(lambda s: s["success_collision_free"].mean())
+    SEP = grid(lambda s: s["min_sep_m"].median())
+
+    fig, axs = plt.subplots(1, 3, figsize=(15.5, 4.6))
+
+    # heatmap 1 -- collision-free success (sequential, one hue)
+    ax = axs[0]
+    im = ax.imshow(CF, cmap="Blues", vmin=0, vmax=1, origin="lower", aspect="auto")
+    ax.set_xticks(range(len(prs))); ax.set_xticklabels(prs)
+    ax.set_yticks(range(len(rrs))); ax.set_yticklabels(rrs)
+    ax.set_xlabel("pedestrian responsibility  (crowd yields →)")
+    ax.set_ylabel("robot responsibility")
+    for i in range(len(rrs)):
+        for j in range(len(prs)):
+            if np.isfinite(CF[i, j]):
+                ax.text(j, i, f"{100 * CF[i, j]:.0f}", ha="center", va="center",
+                        fontsize=10, color="#fff" if CF[i, j] > 0.55 else INK)
+    # the shipped operating point
+    ax.plot(prs.index(0.3), rrs.index(0.2), marker="*", ms=17, color=BAD,
+            markeredgecolor="#fff", markeredgewidth=1.0, zorder=5)
+    ax.set_title("Collision-free success rate  (★ = shipped)", loc="left")
+    fig.colorbar(im, ax=ax, fraction=0.046, label="rate")
+
+    # heatmap 2 -- median clearance, to show it is the SAME constant everywhere
+    # the pair does not fail
+    ax = axs[1]
+    im = ax.imshow(SEP, cmap="Blues", vmin=0, vmax=0.4, origin="lower", aspect="auto")
+    ax.set_xticks(range(len(prs))); ax.set_xticklabels(prs)
+    ax.set_yticks(range(len(rrs))); ax.set_yticklabels(rrs)
+    ax.set_xlabel("pedestrian responsibility")
+    ax.set_ylabel("robot responsibility")
+    for i in range(len(rrs)):
+        for j in range(len(prs)):
+            if np.isfinite(SEP[i, j]):
+                ax.text(j, i, f"{SEP[i, j]:.2f}", ha="center", va="center",
+                        fontsize=9, color="#fff" if SEP[i, j] > 0.22 else INK)
+    ax.set_title("Median clearance [m]", loc="left")
+    fig.colorbar(im, ax=ax, fraction=0.046, label="m")
+
+    # does the reciprocity SUM predict success? plot collision-free vs r+p.
+    # if ORCA's "shares sum to 1" intuition held, success would climb with the
+    # sum; if only the crowd's share matters, points at equal ped-share stack
+    # vertically regardless of sum.
+    ax = axs[2]
+    for i, rr in enumerate(rrs):
+        xs = [rr + pr for pr in prs]
+        ys = [CF[i, j] for j in range(len(prs))]
+        ax.plot(xs, ys, "-o", color=C[i], lw=1.8, ms=6,
+                label=f"robot {rr}")
+    ax.set_xlabel("robot + pedestrian responsibility  (reciprocity total)")
+    ax.set_ylabel("collision-free success")
+    ax.set_ylim(-0.05, 1.1)
+    ax.set_yticks([0, 0.5, 1.0]); ax.set_yticklabels(["0", "50%", "100%"])
+    ax.set_title("Does the total share predict success?", loc="left")
+    ax.grid(True); ax.legend(fontsize=8, title="", loc="lower right")
+
+    fig.suptitle("Q-H  The reciprocity plane — who takes the avoidance, robot or "
+                 "crowd?", x=0.02, ha="left", fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    _save(fig, "qh_reciprocity")
+
+    t = df.groupby(["robot_responsibility", "ped_responsibility"]).agg(
+        n=("success", "size"), collision_free=("success_collision_free", "mean"),
+        collided=("collided", "mean"), min_sep=("min_sep_m", "median"),
+        t_goal=("t_goal_s", "median"), path_ratio=("path_ratio", "median")).round(3)
+    t.to_csv(os.path.join(RESULTS, "table_qh_reciprocity.csv"))
+    print(t.to_string())
+
+
 ALL = dict(qa=qa, qb=qb, qb2=qb2, qc=qc, qc_traj=qc_traj, qd=qd, qe=qe, qf=qf,
-           qg=qg, qg2=qg2)
+           qg=qg, qg2=qg2, qh=qh)
 
 
 def main():

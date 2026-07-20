@@ -186,6 +186,32 @@ def qa_solo():
     return runs
 
 
+def qh_reciprocity():
+    """Q-H: the reciprocity plane -- robot share x crowd share.
+
+    Q-D swept the robot's responsibility against its safety margin and found
+    clearance inert. Q-G2 swept the crowd's responsibility alone. This crosses
+    the two: robot_responsibility x ped_responsibility on the random x8 scene.
+
+    The question is whether ORCA's reciprocity intuition holds on this coupled
+    system -- in the reference algorithm a pair's shares sum to ~1.0 for a fully
+    resolved encounter, and the shipped default sums to only 0.2 + 0.3 = 0.5. If
+    the sum is what matters, the failure frontier should fall along an
+    anti-diagonal (robot + ped = const); if only the crowd's share matters (as
+    Q-G/Q-G2 hint), the frontier should be horizontal.
+
+    random x8, 10 seeds -> 200 runs.
+    """
+    runs = []
+    for rr in (0.0, 0.2, 0.5, 1.0):
+        for pr in (0.0, 0.1, 0.2, 0.3, 0.5):
+            for seed in SEEDS:
+                runs.append(_base(scenario="random", n_peds=8, seed=seed,
+                                  robot_responsibility=rr, ped_responsibility=pr,
+                                  run_id=f"qh_r{rr}_p{pr}_s{seed}"))
+    return runs
+
+
 def qg2_ped_responsibility():
     """Q-G2: how much crowd cooperation does the robot minimally need?
 
@@ -250,6 +276,7 @@ EXPERIMENTS = {
     "qb2_speed": qb2_speed,
     "qg_cooperation": qg_cooperation,
     "qg2_ped_responsibility": qg2_ped_responsibility,
+    "qh_reciprocity": qh_reciprocity,
     "qc_scenarios": qc_scenarios,
     "qd_responsibility": qd_responsibility,
     "qe_density": qe_density,

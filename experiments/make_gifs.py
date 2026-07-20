@@ -37,8 +37,11 @@ SCEN_TITLE = {"empty": "Empty (control)", "head_on": "Head-on",
               "crossing": "Crossing", "corridor": "Corridor",
               "circle": "Circle", "random": "Random crowd"}
 
-ROBOT = "#0d7a4f"       # green
-ROBOT_EDGE = "#064f33"
+# A vivid mid-green rather than a dark one: the GIF's 256-colour palette
+# quantises a dark saturated fill toward its own edge and the robot reads as a
+# hollow ring; a brighter green stays solid.
+ROBOT = "#16a34a"       # green
+ROBOT_EDGE = "#0a6b31"
 GOAL = "#cc3b3a"        # red
 PED = "#5b666e"         # slate
 PED_FILL = "#aab3ba"
@@ -143,15 +146,21 @@ def _make_artists(ax, n_peds, ped_radii):
         ax.add_patch(c)
         ped_bodies.append(c)
     robot_body = Circle((0, 0), ROBOT_R, facecolor=ROBOT, edgecolor=ROBOT_EDGE,
-                        lw=1.4, zorder=5)
+                        lw=1.6, zorder=5)
     ax.add_patch(robot_body)
+    # a white pip at the robot centre so it reads as "the robot" at a glance and
+    # never as just another disk
+    robot_pip = Circle((0, 0), 0.06, facecolor="#ffffff", edgecolor=ROBOT_EDGE,
+                       lw=0.8, zorder=6)
+    ax.add_patch(robot_pip)
     time_text = ax.text(0.03, 0.97, "", transform=ax.transAxes, va="top",
                         ha="left", fontsize=11, color=INK,
                         family="monospace",
                         bbox=dict(boxstyle="round,pad=0.25", fc="#ffffffcc",
                                   ec=GRID, lw=0.6))
     return dict(robot_trail=robot_trail, robot_body=robot_body,
-                ped_trails=ped_trails, ped_bodies=ped_bodies, time_text=time_text)
+                robot_pip=robot_pip, ped_trails=ped_trails,
+                ped_bodies=ped_bodies, time_text=time_text)
 
 
 TRAIL = 45   # samples of history drawn behind each body
@@ -163,6 +172,7 @@ def _update(A, d, ridx, t_grid, frame):
     rx = d["ROBOT_XY"]
     A["robot_trail"].set_data(rx[lo:i + 1, 0], rx[lo:i + 1, 1])
     A["robot_body"].center = (rx[i, 0], rx[i, 1])
+    A["robot_pip"].center = (rx[i, 0], rx[i, 1])
     px = d["PED_XY"]
     for k, (tr, bd) in enumerate(zip(A["ped_trails"], A["ped_bodies"])):
         tr.set_data(px[lo:i + 1, k, 0], px[lo:i + 1, k, 1])

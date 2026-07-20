@@ -1292,7 +1292,7 @@ def _read_runtime_params():
     global SCENARIO, PEDESTRIAN_SENSOR_DATA
     global RENDER, SEED, N_PEDS, ROBOT_RESPONSIBILITY, PED_RESPONSIBILITY
     global SAFETY_MARGIN, OUT_DIR, RUN_ID, WALK_DURATION, ROBOT_GOAL
-    global CROWD_AVOIDS_ROBOT
+    global CROWD_AVOIDS_ROBOT, EARLY_STOP
     global DESIRED_SPEED, MAX_SPEED
     node = rclpy.create_node("walking_params")
 
@@ -1309,6 +1309,7 @@ def _read_runtime_params():
     PED_RESPONSIBILITY = float(_p("ped_responsibility", PED_RESPONSIBILITY))
     SAFETY_MARGIN = float(_p("safety_margin", SAFETY_MARGIN))
     CROWD_AVOIDS_ROBOT = _p("crowd_avoids_robot", CROWD_AVOIDS_ROBOT)
+    EARLY_STOP = _p("early_stop", EARLY_STOP)
     DESIRED_SPEED = float(_p("desired_speed", DESIRED_SPEED))
     MAX_SPEED = float(_p("max_speed", MAX_SPEED))
     WALK_DURATION = float(_p("walk_duration", WALK_DURATION))

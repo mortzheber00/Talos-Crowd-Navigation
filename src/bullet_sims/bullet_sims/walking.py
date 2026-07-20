@@ -96,6 +96,11 @@ PEDESTRIAN_SENSOR_DATA = True    # True: depth-camera perception; False: ground-
 RENDER = True             # False: no MuJoCo viewer (required for batch runs)
 SEED = 0                  # RNG seed: crowd layout + preferred-velocity noise
 N_PEDS = 12               # pedestrians in the 'random' scenario (density sweep)
+# Half-width [m] of the box the 'random' scenario scatters starts and goals in.
+# The real density lever: shrinking it puts the same number of pedestrians into
+# a smaller area, so more of them actually cross the robot's corridor instead of
+# wandering the periphery.
+CROWD_EXTENT = 5.0
 ROBOT_RESPONSIBILITY = 0.2   # ORCA reciprocity share taken by the robot
 PED_RESPONSIBILITY = 0.3     # ... and by each pedestrian
 SAFETY_MARGIN = 0.2       # [m] extra radius the robot's ORCA plans with
@@ -160,7 +165,8 @@ def _setup_crowd(simulator):
     if SCENARIO == "random":
         # clear_radius keeps the crowd off the robot's spawn, so a run never
         # starts already in collision
-        scenarios.build(crowd, SCENARIO, n=N_PEDS, seed=SEED, clear_radius=1.5)
+        scenarios.build(crowd, SCENARIO, n=N_PEDS, seed=SEED,
+                        extent=CROWD_EXTENT, clear_radius=1.5)
     else:
         scenarios.build(crowd, SCENARIO)
     return crowd
@@ -1292,7 +1298,7 @@ def _read_runtime_params():
     global SCENARIO, PEDESTRIAN_SENSOR_DATA
     global RENDER, SEED, N_PEDS, ROBOT_RESPONSIBILITY, PED_RESPONSIBILITY
     global SAFETY_MARGIN, OUT_DIR, RUN_ID, WALK_DURATION, ROBOT_GOAL
-    global CROWD_AVOIDS_ROBOT, EARLY_STOP
+    global CROWD_AVOIDS_ROBOT, EARLY_STOP, CROWD_EXTENT
     global DESIRED_SPEED, MAX_SPEED
     node = rclpy.create_node("walking_params")
 
@@ -1310,6 +1316,7 @@ def _read_runtime_params():
     SAFETY_MARGIN = float(_p("safety_margin", SAFETY_MARGIN))
     CROWD_AVOIDS_ROBOT = _p("crowd_avoids_robot", CROWD_AVOIDS_ROBOT)
     EARLY_STOP = _p("early_stop", EARLY_STOP)
+    CROWD_EXTENT = float(_p("crowd_extent", CROWD_EXTENT))
     DESIRED_SPEED = float(_p("desired_speed", DESIRED_SPEED))
     MAX_SPEED = float(_p("max_speed", MAX_SPEED))
     WALK_DURATION = float(_p("walk_duration", WALK_DURATION))
@@ -1391,6 +1398,7 @@ def main():
                     robot_responsibility=ROBOT_RESPONSIBILITY,
                     ped_responsibility=PED_RESPONSIBILITY,
                     safety_margin=SAFETY_MARGIN,
+                    crowd_extent=CROWD_EXTENT,
                     crowd_avoids_robot=CROWD_AVOIDS_ROBOT,
                     desired_speed=DESIRED_SPEED, max_speed=MAX_SPEED,
                     goal_x=ROBOT_GOAL[0], goal_y=ROBOT_GOAL[1],

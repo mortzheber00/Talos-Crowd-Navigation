@@ -72,12 +72,40 @@ def _save(fig, name):
     print(f"  -> figures/{name}.png")
 
 
+GOAL_TOL = 0.3
+
+
+def _fix_path_ratio(df):
+    """Back-correct path_ratio on result sets written before the fix.
+
+    Path length is accumulated only until the robot first enters the goal
+    tolerance ball, so it stops GOAL_TOL short of the goal, while the raw
+    straight-line distance ran all the way to the centre. That understated every
+    ratio by GOAL_TOL/straight (~7.5% at a 4 m goal) -- enough to put a
+    dead-straight empty-world run at 0.968, i.e. "shorter than a straight line",
+    which is impossible and is what gave the bug away.
+
+    Both terms are stored per run, so the correction is exact and no re-simulation
+    is needed. Only runs that actually reached the goal are corrected; a run that
+    timed out never got to the ball, so its denominator was already right.
+    """
+    if "path_ratio" not in df or "path_len_m" not in df:
+        return df
+    if "straight_len_eff_m" in df:          # already correct at write time
+        return df
+    reached = df.get("reached_goal", pd.Series(False, index=df.index)).astype(bool)
+    denom = np.where(reached, df["straight_len_m"] - GOAL_TOL, df["straight_len_m"])
+    df["path_ratio_raw"] = df["path_ratio"]
+    df["path_ratio"] = np.where(denom > 1e-6, df["path_len_m"] / denom, np.nan)
+    return df
+
+
 def _load(name):
     path = os.path.join(RESULTS, f"{name}.csv")
     if not os.path.exists(path):
         print(f"[skip] {name}: no {path}")
         return None
-    df = pd.read_csv(path)
+    df = _fix_path_ratio(pd.read_csv(path))
     print(f"[load] {name}: {len(df)} runs")
     return df
 
@@ -100,15 +128,22 @@ def _rate(x):
     return p, min(lo, p), max(hi, p)
 
 
-def _bar_ci(ax, labels, rates, los, his, colors, ylabel):
+def _bar_ci(ax, labels, rates, los, his, colors, ylabel, counts=None):
+    """Bars with a Wilson interval. ``counts`` = list of (successes, n); when
+    given, each bar is labelled with the raw fraction as well as the percentage.
+    A bare '100%' invites the reader to assume the estimate is exact, where
+    '10/10' shows the sample it rests on."""
     x = np.arange(len(labels))
     ax.bar(x, rates, color=colors, width=0.62, zorder=2)
     ax.errorbar(x, rates, yerr=[np.array(rates) - np.array(los),
                                 np.array(his) - np.array(rates)],
                 fmt="none", ecolor=INK2, elinewidth=1.2, capsize=4, zorder=3)
-    for xi, r in zip(x, rates):
-        ax.text(xi, r + 0.03, f"{100 * r:.0f}%", ha="center", va="bottom",
-                fontsize=9, color=INK)
+    for i, (xi, r) in enumerate(zip(x, rates)):
+        lbl = f"{100 * r:.0f}%"
+        if counts is not None:
+            lbl += f"\n{counts[i][0]}/{counts[i][1]}"
+        ax.text(xi, r + 0.03, lbl, ha="center", va="bottom",
+                fontsize=9, color=INK, linespacing=1.3)
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylim(0, 1.15)
@@ -370,15 +405,17 @@ def qc():
 
     fig, axs = plt.subplots(1, 3, figsize=(14.5, 4.4))
 
-    rates, los, his = [], [], []
+    rates, los, his, counts = [], [], [], []
     for s in scens:
-        p, lo, hi = _rate(g.get_group(s)["success_collision_free"])
+        col = g.get_group(s)["success_collision_free"]
+        p, lo, hi = _rate(col)
         rates.append(p); los.append(lo); his.append(hi)
+        counts.append((int(col.sum()), int(col.size)))
     # 'empty' is the control, so it is drawn in a different slot than the
     # crowd scenarios rather than reading as just another condition
     colors = [C[6] if s == "empty" else C[0] for s in scens]
     _bar_ci(axs[0], scens, rates, los, his, colors,
-            "collision-free success")
+            "collision-free success", counts=counts)
     axs[0].axhline(0.8, color=BAD, ls="--", lw=1.4, zorder=4)
     axs[0].text(-0.45, 0.815, "project bar: 80%", ha="left", va="bottom",
                 fontsize=9, color=BAD, zorder=5)
@@ -409,12 +446,21 @@ def qc():
                     medianprops=dict(color=INK, lw=2))
     for patch, (_, _, c) in zip(bp["boxes"], keep):
         patch.set_facecolor(c); patch.set_alpha(0.85); patch.set_edgecolor(INK2)
-    ax.axhline(1.0, color=INK2, ls="--", lw=1.2)
-    ax.text(0.55, 1.0, " straight line", ha="left", va="bottom",
-            fontsize=9, color=INK2)
+    # Two references. 1.0 is the geometric ideal, but no legged robot reaches it:
+    # the CoM sways laterally every step, so even the empty world costs ~5%. The
+    # empty-world median is therefore the honest floor -- distance above *it* is
+    # the detour the crowd actually caused.
+    ax.axhline(1.0, color=INK2, ls=":", lw=1.1)
+    ax.text(len(keep) + 0.45, 1.0, "geometric straight line ", ha="right",
+            va="bottom", fontsize=8.5, color=INK2)
+    if "empty" in set(df["scenario"]):
+        floor = g.get_group("empty")["path_ratio"].median()
+        ax.axhline(floor, color=C[6], ls="--", lw=1.4)
+        ax.text(0.55, floor, f" gait floor (empty world) = {floor:.3f}",
+                ha="left", va="bottom", fontsize=8.5, color=C[6])
     ax.tick_params(axis="x", rotation=30)
     ax.set_ylabel("path length / straight-line distance")
-    ax.set_title("Detour cost", loc="left")
+    ax.set_title("Detour cost  — above the gait floor = the crowd", loc="left")
     ax.grid(axis="y")
 
     fig.suptitle("Q-C  Navigation performance per scenario "
@@ -864,7 +910,7 @@ def qg2():
     ax.set_title("How much crowd cooperation the robot needs", loc="left")
     ax.grid(True); ax.legend(fontsize=9, loc="lower right")
     # anchor the two Q-G endpoints in words
-    ax.text(0.0, 1.03, "shipped default = 0.3", fontsize=8.5, color=INK2)
+    ax.text(0.0, 1.03, "sweep baseline = 0.3", fontsize=8.5, color=INK2)
 
     # clearance vs yield
     ax = axs[1]
@@ -940,10 +986,10 @@ def qh():
             if np.isfinite(CF[i, j]):
                 ax.text(j, i, f"{100 * CF[i, j]:.0f}", ha="center", va="center",
                         fontsize=10, color="#fff" if CF[i, j] > 0.55 else INK)
-    # the shipped operating point
+    # the value the other sweeps hold fixed -- a reference point, not a choice
     ax.plot(prs.index(0.3), rrs.index(0.2), marker="*", ms=17, color=BAD,
             markeredgecolor="#fff", markeredgewidth=1.0, zorder=5)
-    ax.set_title("Collision-free success rate  (★ = shipped)", loc="left")
+    ax.set_title("Collision-free success rate  (★ = sweep baseline)", loc="left")
     fig.colorbar(im, ax=ax, fraction=0.046, label="rate")
 
     # heatmap 2 -- median clearance, to show it is the SAME constant everywhere

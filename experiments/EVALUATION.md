@@ -186,7 +186,7 @@ in time-to-goal**, because the extra commanded speed was never delivered.
 | 0.30 | 0.299 | 1.02 | 14.53 | 1.075 | 100 % |
 | 0.45 | 0.387 | 0.93 | 10.73 | 1.024 | 100 % |
 | **0.60** | **0.403** | **0.76** | **10.18** | **1.016** | 100 % |
-| 1.20 (shipped) | 0.408 | 0.45 | 10.28 | 1.048 | 100 % |
+| 1.20 (baseline) | 0.408 | 0.45 | 10.28 | 1.048 | 100 % |
 
 **Confirmed, with a sharper answer than predicted.** Achieved speed saturates at
 ≈0.40 m/s — close to the 0.44 m/s the footstep clamp allows — and does not move
@@ -239,8 +239,9 @@ Q-G asks.
 `robot_responsibility` ∈ {0.0, 0.2, 0.5, 1.0} × `safety_margin` ∈ {0.1, 0.2, 0.4}.
 
 Responsibility 0.0 means the robot assumes pedestrians will do all the avoiding;
-1.0 means it yields entirely. The team currently ships 0.2 — i.e. the robot
-mostly expects to be avoided. Whether that is justified is exactly the question.
+1.0 means it yields entirely. The other sweeps hold 0.2. That value carries no
+design intent -- it is simply what the code held while these experiments were
+being built, so it is a reference point, not a recommendation under test.
 
 `[TBD table_qd_responsibility.csv]` — partial (64 of 120):
 
@@ -269,8 +270,8 @@ the robot's entire safety configuration is inert.**
 What the robot's responsibility *does* buy is efficiency, and the effect is
 large: at 0.0 the robot needs 15–16 s and walks 1.4× the straight-line distance
 (it is shoved around and has to recover); at 0.2–0.5 it needs ~9–10 s at ≈1.0×.
-So the shipped 0.2 is a reasonable choice — but for goal efficiency, not for
-safety, which is not what the parameter's name suggests.
+So 0.2 lands in a reasonable region — but for goal efficiency, not for safety,
+which is not what the parameter's name suggests.
 
 This is the strongest possible motivation for Q-G: a safety parameter that
 changes nothing about safety is what you would expect if the robot were not the
@@ -361,7 +362,7 @@ just needs a ceiling.
 
 The attribution experiment, added because Q-C was too clean.
 
-Cooperative crowd (shipped default) vs a crowd blind to the robot, paired by
+Cooperative crowd (the sweep baseline) vs a crowd blind to the robot, paired by
 (scenario, density, seed), at four conditions: head-on ×2, crossing ×4,
 random ×8, random ×16.
 
@@ -424,7 +425,7 @@ avoidance (`ped_responsibility` from 0.5 down to 0.0). 150 runs.
 | 0.0 | 100 % | 100 % | **60 %** (40 % collide, clearance 0.17 m) |
 | 0.1 | 100 % | 100 % | 100 % |
 | 0.2 | 100 % | 100 % | 100 % |
-| 0.3 (shipped) | 100 % | 100 % | 100 % |
+| 0.3 (baseline) | 100 % | 100 % | 100 % |
 | 0.5 | 100 % | 100 % | 100 % |
 
 **The curve has a sharp knee at 0.1, and it refines the Q-G story rather than
@@ -450,15 +451,15 @@ was not pursued.
 So the fair, final statement is not "the robot does nothing" but: **the robot's
 avoidance is sufficient for any crowd that can see it, and useless against one
 that cannot — and it is too slow to protect itself in either case if the crowd
-actively ignores it.** The shipped 0.3 sits comfortably on the safe side of the
-knee.
+actively ignores it.** The 0.3 the other sweeps use sits comfortably on the safe
+side of the knee.
 
 ### Q-H — the reciprocity plane  → `figures/qh_reciprocity.png`
 
 Q-D swept the robot's share against its safety margin; Q-G2 swept the crowd's
 share alone. Q-H crosses them: `robot_responsibility × ped_responsibility` on
 random ×8, 200 runs. In reference ORCA a pair's shares sum to ~1.0 for a fully
-resolved encounter, and the shipped default sums to only 0.2 + 0.3 = 0.5 — so
+resolved encounter, and the baseline pair sums to only 0.2 + 0.3 = 0.5 — so
 does the *total* matter, or only who provides it?
 
 | robot ↓ / ped → | 0.0 | 0.1 | 0.2 | 0.3 | 0.5 |
@@ -468,7 +469,7 @@ does the *total* matter, or only who provides it?
 | **0.5** | 60 % | 100 % | 100 % | 100 % | 100 % |
 | **1.0** | 60 % | 100 % | 100 % | 100 % | 100 % |
 
-(collision-free success; ★ = shipped default. Clearance is 0.35 m in every cell
+(collision-free success; ★ = the baseline the other sweeps hold. Clearance is 0.35 m in every cell
 except the ped = 0 column, where it degrades to between +0.21 m at robot 1.0 and
 −0.34 m at robot 0.0.)
 
@@ -493,10 +494,11 @@ Three readings:
   late.
 
 The one genuinely bad cell is (robot 0.0, ped 0.0) at 30 % — nobody avoids
-anyone. The shipped (0.2, 0.3) is deep in the safe interior; if anything Q-H says
-the robot's own 0.2 is barely doing anything the crowd's 0.3 was not already
-handling, and could be raised for a little insurance in the ped → 0 direction at
-no cost elsewhere.
+anyone. The baseline (0.2, 0.3) sits deep in the safe interior. Note this is a
+description, not a defence: those values carry no design intent, they are just
+what the code held. If a value has to be chosen, the data says the robot's share
+can be raised toward 0.5 for insurance in the ped → 0 direction at no cost
+elsewhere.
 
 ---
 

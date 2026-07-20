@@ -62,15 +62,34 @@ def random_crowd(crowd, n=12, extent=5.0, min_start_gap=1.0, seed=0,
     """
     rng = np.random.default_rng(seed)
     centre = np.asarray(clear_centre, dtype=float)
+
+    # A dense request can be geometrically impossible at the requested spacing
+    # (48 pedestrians 1 m apart do not fit in a 6x6 box). Rather than silently
+    # returning a smaller crowd -- which would quietly turn a density sweep into
+    # a sweep of "however many happened to fit" -- relax the spacing until they
+    # do fit, and say so. The floor is one pedestrian diameter, below which they
+    # would start already overlapping.
+    floor = 2.0 * getattr(crowd, "def_radius", 0.3)
+    gap = float(min_start_gap)
     starts = []
-    tries = 0
-    while len(starts) < n and tries < 10000:
-        tries += 1
-        c = rng.uniform(-extent, extent, 2)
-        if clear_radius > 0.0 and np.hypot(*(c - centre)) < clear_radius:
-            continue
-        if all(np.hypot(*(c - s)) >= min_start_gap for s in starts):
-            starts.append(c)
+    while True:
+        starts, tries = [], 0
+        while len(starts) < n and tries < 20000:
+            tries += 1
+            c = rng.uniform(-extent, extent, 2)
+            if clear_radius > 0.0 and np.hypot(*(c - centre)) < clear_radius:
+                continue
+            if all(np.hypot(*(c - s)) >= gap for s in starts):
+                starts.append(c)
+        if len(starts) >= n or gap <= floor + 1e-9:
+            break
+        gap = max(floor, 0.85 * gap)
+        print(f"[scenarios] {n} pedestrians do not fit at {min_start_gap:.2f} m "
+              f"spacing in a {2*extent:.1f} m box; relaxing to {gap:.2f} m")
+    if len(starts) < n:
+        print(f"[scenarios] WARNING: placed only {len(starts)}/{n} pedestrians "
+              f"at the {floor:.2f} m floor -- the box is saturated")
+
     for s in starts:
         g = rng.uniform(-extent, extent, 2)
         crowd.add(position=s.tolist(), goal=g.tolist(), on_arrival="reverse")

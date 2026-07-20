@@ -202,6 +202,13 @@ def summarize(L, meta, goal_tol=0.3):
     start = L.ROBOT_XY[np.flatnonzero(np.isfinite(L.ROBOT_XY[:, 0]))[0]] \
         if np.isfinite(L.ROBOT_XY[:, 0]).any() else np.array([np.nan, np.nan])
     straight = float(np.hypot(*(L.GOAL - start)))
+    # Path length is accumulated only until the robot first enters the goal
+    # tolerance ball, so it stops goal_tol short of the goal while the raw
+    # straight-line distance runs all the way to the centre. Comparing the two
+    # understated every ratio by goal_tol/straight (~7.5% at a 4 m goal, which
+    # is why a dead-straight empty-world run scored 0.968). Measure both to the
+    # same endpoint: the boundary of the tolerance ball.
+    straight_eff = max(straight - goal_tol, 1e-6) if reached_goal else straight
 
     # ZMP tracking, healthy samples only: the gait-stability side of the story
     healthy = np.isfinite(com_z) & (com_z > COM_Z_HEALTHY)
@@ -231,7 +238,12 @@ def summarize(L, meta, goal_tol=0.3):
         # --- efficiency ---
         path_len_m=path_len,
         straight_len_m=straight,
-        path_ratio=float(path_len / straight) if straight > 1e-6 else float('nan'),
+        straight_len_eff_m=straight_eff,
+        path_ratio=(float(path_len / straight_eff)
+                    if straight_eff > 1e-6 else float('nan')),
+        # The uncorrected ratio, kept so older result sets remain comparable.
+        path_ratio_raw=(float(path_len / straight)
+                        if straight > 1e-6 else float('nan')),
         final_dist_goal_m=(float(L.DIST_GOAL[upto][-1]) if upto.any()
                            else float('nan')),
         mean_speed_mps=(float(path_len / horizon)

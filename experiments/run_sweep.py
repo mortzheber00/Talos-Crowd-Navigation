@@ -52,7 +52,7 @@ SEEDS = list(range(10))
 def _base(**kw):
     cfg = dict(scenario="random", n_peds=8, pedestrian_sensor_data=False,
                robot_responsibility=0.2, ped_responsibility=0.3,
-               safety_margin=0.2, crowd_avoids_robot=True,
+               safety_margin=0.2, crowd_avoids_robot=True, crowd_extent=5.0,
                walk_duration=45.0, render=False)
     cfg.update(kw)
     return cfg
@@ -186,6 +186,32 @@ def qa_solo():
     return runs
 
 
+def qs_stress():
+    """Stage A: find a crowd hard enough that the outcome is not saturated.
+
+    The existing sweeps sit at random x8, where essentially everything succeeds,
+    so a 4x5 reciprocity plane measured there is 100% in 19 of 20 cells and can
+    show no gradient. This calibrates a harder operating point before spending
+    200 runs on it.
+
+    Two levers. ``n_peds`` is the obvious one; ``crowd_extent`` is the effective
+    one -- it is the half-width of the box starts and goals are drawn in, so
+    shrinking it puts the same number of pedestrians into a smaller area and,
+    more importantly, puts more of them across the robot's corridor rather than
+    wandering the periphery.
+
+    Target: a setting with roughly 20-40% collisions. Harder than that and the
+    plane saturates at the other end, which is equally uninformative.
+    """
+    runs = []
+    for extent in (5.0, 3.0):
+        for n in (8, 16, 24, 32, 48):
+            for seed in SEEDS:
+                runs.append(_base(n_peds=n, crowd_extent=extent, seed=seed,
+                                  run_id=f"qs_e{extent}_n{n}_s{seed}"))
+    return runs
+
+
 def qh_reciprocity():
     """Q-H: the reciprocity plane -- robot share x crowd share.
 
@@ -277,6 +303,7 @@ EXPERIMENTS = {
     "qg_cooperation": qg_cooperation,
     "qg2_ped_responsibility": qg2_ped_responsibility,
     "qh_reciprocity": qh_reciprocity,
+    "qs_stress": qs_stress,
     "qc_scenarios": qc_scenarios,
     "qd_responsibility": qd_responsibility,
     "qe_density": qe_density,

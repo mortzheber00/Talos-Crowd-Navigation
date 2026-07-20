@@ -59,8 +59,15 @@ def _classify(s):
     return "timeout"
 
 
-def _load(dirs):
-    """Every (robot_xy, time, class) with a JSON outcome, across the given dirs."""
+def _load(dirs, sensor=None):
+    """Every (robot_xy, time, class) with a JSON outcome, across the given dirs.
+
+    ``sensor`` filters the population: False = ground-truth runs only, True =
+    depth-camera runs only, None = both. Pooling them is misleading -- the
+    perception runs are a different system (the robot flees phantom obstacles),
+    and mixing 42 of them into 791 ground-truth runs paints the wandering
+    trajectories as if the ground-truth stack produced them.
+    """
     runs = []
     for d in dirs:
         for jp in glob.glob(os.path.join(d, "*.json")):
@@ -71,6 +78,8 @@ def _load(dirs):
                 s = json.load(open(jp))
                 z = np.load(npz)
             except Exception:
+                continue
+            if sensor is not None and bool(s.get("sensor")) is not sensor:
                 continue
             rx = z["ROBOT_XY"]
             t = z["TIME"]
@@ -200,6 +209,9 @@ def main():
     ap.add_argument("--poster", action="store_true",
                     help="also save the final-frame still (the 'fan')")
     ap.add_argument("--title", default=None)
+    ap.add_argument("--sensor", choices=["gt", "perception", "both"], default="gt",
+                    help="which population to draw (default: gt -- perception "
+                         "runs are a different system, see _load)")
     args = ap.parse_args()
 
     if args.dirs:
@@ -208,12 +220,13 @@ def main():
         dirs = [d for d in glob.glob(os.path.join(RESULTS, "*"))
                 if os.path.isdir(d) and os.path.basename(d) != "gif_runs"]
 
-    runs = _load(dirs)
+    sensor = {"gt": False, "perception": True, "both": None}[args.sensor]
+    runs = _load(dirs, sensor=sensor)
     if not runs:
         print("no runs with paired npz+json found")
         return 1
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    print(f"[ensemble] {len(runs)} runs from {len(dirs)} dirs, "
+    print(f"[ensemble] {len(runs)} runs ({args.sensor}) from {len(dirs)} dirs, "
           f"T={args.T}s @ {args.fps} fps")
     build(runs, args.T, args.fps, args.out, poster=args.poster, title=args.title)
     return 0

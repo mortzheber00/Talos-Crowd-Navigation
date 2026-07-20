@@ -33,15 +33,15 @@ def generate_launch_description():
     )
 
     # The stand_and_perceive simulation script
-    stand_and_perceive_node = Node(
+    walking_node = Node(
         package='bullet_sims',
-        executable='walk_and_perceive',
+        executable='walking',
         output='screen',
-        name='walk_and_perceive',
+        name='walking',
     )
 
     return LaunchDescription([
-        stand_and_perceive_node,
+        walking_node,
         depth_image_proc_launch,
         ros_visuals_launch,
     ])

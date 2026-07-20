@@ -840,7 +840,12 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     node = robot._node
     obstacle_topic = ('obstacles/perceived' if PEDESTRIAN_SENSOR_DATA
                       else 'obstacles/ground_truth')
+    # ORCA plans from the CoM state on 'odom_com' (published at the control rate
+    # by robot.publish_com_odom()), NOT the base_link 'odom': the swaying pelvis
+    # velocity makes ORCA back the robot up, and the 30 Hz base-odom rate makes
+    # it hesitate near a crowd.
     orca_node = ORCAVelocityNode(goal=ROBOT_GOAL, obstacle_topic=obstacle_topic,
+                                 odom_topic='odom_com',
                                  radius=0.35, max_speed=1.5,
                                  desired_speed=1.2, safety_margin=0.2)
     executor = SingleThreadedExecutor()
@@ -888,9 +893,20 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         # move the crowd (pedestrians avoid the robot via ground truth either way)
         crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
 
-        # process pending ROS callbacks: the ORCA node consumes odom +
-        # obstacles and publishes cmd_vel; our cached nav.* values update here
-        executor.spin_once(timeout_sec=0.0)
+        # feed the ORCA node the fresh CoM state at ~200 Hz (every 5th 1 kHz
+        # tick) before spinning, so v_cmd tracks the robot closely -- the 30 Hz
+        # sensor-publish rate below is too coarse and makes it hesitate.
+        if i % 5 == 0:
+            robot.publish_com_odom()
+
+        # Drain ALL pending ROS callbacks so the ORCA round-trip
+        # (odom_com -> ORCA -> cmd_vel -> nav.v_cmd) completes within this tick.
+        # A single spin_once processes only one callback, leaving v_cmd several
+        # ticks stale -- that lag makes the robot hesitate near a crowd and the
+        # trajectory non-deterministic run-to-run. spin_once(0) is a cheap no-op
+        # once the queue is empty.
+        for _ in range(8):
+            executor.spin_once(timeout_sec=0.0)
         v_cmd = nav.v_cmd
         v_pref = nav.v_pref
 

@@ -201,6 +201,13 @@ class Talos:
 
         self._joint_pub = self._node.create_publisher(JointState, 'joint_states', 10)
         self._odom_pub = self._node.create_publisher(Odometry, 'odom', 10)
+        # Center-of-mass state for the local planner (ORCA), on its own topic.
+        # ORCA must plan from the CoM, not the base_link odom above: the pelvis
+        # sways/bobs at the gait frequency, and feeding that oscillating base
+        # velocity into ORCA's reciprocal avoidance makes v_cmd flip and the
+        # robot back up near a crowd. Published at the control rate (see
+        # publish_com_odom), not the 30 Hz sensor rate, so v_cmd stays fresh.
+        self._com_odom_pub = self._node.create_publisher(Odometry, 'odom_com', 10)
         self._zmp_pub = self._node.create_publisher(MarkerArray, 'zmp', 10)
         self._wrench_rf_pub = self._node.create_publisher(WrenchStamped, 'wrench_rf', 10)
         self._wrench_lf_pub = self._node.create_publisher(WrenchStamped, 'wrench_lf', 10)
@@ -370,6 +377,30 @@ class Talos:
         if self.dcm is not None:
             markers.markers.append(self._point_marker(now, 1, self.dcm, [0.0, 0.0, 1.0, 1.0]))
         self._zmp_pub.publish(markers)
+
+    def publish_com_odom(self):
+        """Publish the ground-plane CoM state (position + world-frame velocity)
+        as Odometry on ``odom_com`` -- the state the ORCA planner should use.
+
+        Kept separate from publish() so the walking loop can call it at the
+        control rate: the ORCA node recomputes v_cmd on every message here, so a
+        high rate keeps the command fresh (the 30 Hz sensor-publish rate makes
+        the robot hesitate near a crowd). It is cheap (no render), unlike the
+        rest of publish()."""
+        com = self.sim.computeComPosition(self.robot.id())
+        vcom = self.sim.computeComVelocity(self.robot.id())
+        odom = Odometry()
+        odom.header.stamp = self._node.get_clock().now().to_msg()
+        odom.header.frame_id = "world"
+        odom.child_frame_id = "com"
+        odom.pose.pose.position.x = float(com[0])
+        odom.pose.pose.position.y = float(com[1])
+        odom.pose.pose.position.z = float(com[2])
+        odom.pose.pose.orientation.w = 1.0
+        odom.twist.twist.linear.x = float(vcom[0])
+        odom.twist.twist.linear.y = float(vcom[1])
+        odom.twist.twist.linear.z = float(vcom[2])
+        self._com_odom_pub.publish(odom)
 
     @staticmethod
     def _pinhole_K(fovy_deg, width, height):

@@ -36,6 +36,7 @@ setup(
             'walking= bullet_sims.walking:main',
             'stand_and_perceive= bullet_sims.stand_and_perceive:main',
             'walk_and_perceive= bullet_sims.walk_and_perceive:main',
+            'perception_bias_demo= bullet_sims.perception_bias_demo:main',
         ],
     },
 )

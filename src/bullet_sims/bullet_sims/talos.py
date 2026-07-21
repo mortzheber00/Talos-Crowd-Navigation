@@ -11,13 +11,14 @@ from bullet_sims.tsid_wrapper import TSIDWrapper
 # robot configs
 import bullet_sims.talos_conf as conf
 from bullet_sims.footstep_planner import Side
+from orca_nav import debug_viz
 
 # ROS visualizations
 import rclpy
 from rclpy.node import Node
 from tf2_ros import TransformBroadcaster
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import WrenchStamped, TransformStamped
+from geometry_msgs.msg import WrenchStamped, TransformStamped, Point
 from visualization_msgs.msg import Marker, MarkerArray
 from sensor_msgs.msg import JointState, Image, CameraInfo
 from std_msgs.msg import Header
@@ -28,9 +29,10 @@ class Talos:
     combines wbc with pybullet, functions to read and set
     sensor values.
     """
-    def __init__(self, simulator):
+    def __init__(self, simulator, enable_fov_camera=True):
         self.conf = conf
         self.sim = simulator
+        self._fov_camera_enabled = enable_fov_camera
 
         # setup tsid wrapper for whole body controller
         # stack = stack of tasks in TSID framework
@@ -99,16 +101,17 @@ class Talos:
         self.depth_height = 480
         self.depth_fovy = 58.0  # vertical field of view in degrees
 
-        # Publishers for depth image and camera info
-        self.depth_pub = self._node.create_publisher(
-            Image, '/camera/depth/image_rect', 10
-        )
-        self.camera_info_pub = self._node.create_publisher(
-            CameraInfo, '/camera/depth/camera_info', 10
-        )
+        if self._fov_camera_enabled:
+            # Publishers for depth image and camera info
+            self.depth_pub = self._node.create_publisher(
+                Image, '/camera/depth/image_rect', 10
+            )
+            self.camera_info_pub = self._node.create_publisher(
+                CameraInfo, '/camera/depth/camera_info', 10
+            )
 
-        # Compute camera intrinsic matrix once at startup
-        self._compute_camera_intrinsics()
+            # Compute camera intrinsic matrix once at startup
+            self._compute_camera_intrinsics()
 
         # Mount the MuJoCo camera so it *coincides* with the URDF's existing
         # rgbd_optical_frame (published statically by robot_state_publisher as
@@ -128,7 +131,7 @@ class Talos:
         self.camera_pos = [0.066, 0.0, 0.1982]              # = URDF rgbd_link origin
         self.camera_orient = [0.5, -0.5, -0.5, 0.5]         # xyzw: cam frame == rgbd_optical_frame
 
-        if hasattr(self.sim, 'addCameraToLink'):
+        if self._fov_camera_enabled and hasattr(self.sim, 'addCameraToLink'):
             try:
                 self.sim.addCameraToLink(
                     self.camera_parent_link,
@@ -162,7 +165,9 @@ class Talos:
         self._percep_K = {}              # per-camera intrinsics
         percep_fovy, percep_w, percep_h = 90.0, 320, 240
         percep_radial = 0.15             # [m] mount offset along the view dir
-        if self._has_depth_cam:
+        # Independent of the FOV cam (self._has_depth_cam): perception must
+        # work even with the high-res front camera disabled.
+        if hasattr(self.sim, 'addCameraToLink'):
             try:
                 for k in range(4):
                     name = f'percep_cam_{k}'
@@ -181,10 +186,11 @@ class Talos:
                 print(f'[Talos] {len(self._percep_cams)} Rundumsicht-Kameras '
                       f'an {self.camera_parent_link} montiert')
             except Exception as e:
-                print(f'[Talos] Fehler: Rundumsicht-Kameras nicht verfügbar, '
-                      f'nutze nur die Frontkamera: {e}')
-                self._percep_cams = ['rgbd_depth_cam']
-                self._percep_K = {'rgbd_depth_cam': self.K}
+                print(f'[Talos] Fehler: Rundumsicht-Kameras nicht verfügbar: {e}')
+                if self._has_depth_cam:
+                    print('[Talos] nutze nur die Frontkamera als Fallback')
+                    self._percep_cams = ['rgbd_depth_cam']
+                    self._percep_K = {'rgbd_depth_cam': self.K}
 
         ########################################################################
         # 2D obstacle tracking (segmentation-based, for ORCA)
@@ -211,6 +217,13 @@ class Talos:
         self._zmp_pub = self._node.create_publisher(MarkerArray, 'zmp', 10)
         self._wrench_rf_pub = self._node.create_publisher(WrenchStamped, 'wrench_rf', 10)
         self._wrench_lf_pub = self._node.create_publisher(WrenchStamped, 'wrench_lf', 10)
+        # CoM trail for RViz -- the same violet path drawn in the MuJoCo viewer
+        # overlay (debug_viz), so the two views match. See publish_com_trail.
+        self._trail_pub = self._node.create_publisher(MarkerArray, 'com_trail', 10)
+        # Executed + next footsteps for RViz -- the same foot-shaped boxes drawn
+        # in the MuJoCo overlay (see publish_footsteps).
+        self._footstep_pub = self._node.create_publisher(
+            MarkerArray, 'footsteps', 10)
         # obstacle-estimate overlay for RViz (used by publish_obstacle_markers)
         self.marker_pub = self._node.create_publisher(MarkerArray, 'obstacle_markers', 10)
         # obstacle estimates as DATA for downstream planners (ORCA); the marker
@@ -320,6 +333,95 @@ class Talos:
     def com_trail(self):
         """Recorded CoM positions, oldest first (bounded, decimated)."""
         return list(self._com_trail)
+
+    def publish_com_trail(self):
+        """Publish the recorded CoM trail to RViz as one violet SPHERE_LIST, so
+        RViz shows the exact path drawn in the MuJoCo viewer overlay.
+
+        Same look as debug_viz (violet spheres, radius 0.02, along com_trail);
+        a SPHERE_LIST keeps it to a single marker regardless of trail length.
+        Published in the ``world`` frame like the other RViz markers.
+        """
+        marker = Marker()
+        marker.header.frame_id = "world"
+        marker.header.stamp = self._node.get_clock().now().to_msg()
+        marker.ns = "com_trail"
+        marker.id = 0
+        marker.type = Marker.SPHERE_LIST
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        # sphere diameter = 2 * radius (0.02 m in the MuJoCo overlay)
+        marker.scale.x = marker.scale.y = marker.scale.z = 0.04
+        marker.color.r, marker.color.g, marker.color.b, marker.color.a = \
+            0.55, 0.0, 0.75, 0.85
+        # project onto the ground (z=0.02), exactly like the MuJoCo overlay --
+        # the raw CoM z (~0.87 m) would float the spheres in the air.
+        for p in self._com_trail:
+            pt = Point()
+            pt.x, pt.y, pt.z = float(p[0]), float(p[1]), 0.02
+            marker.points.append(pt)
+        self._trail_pub.publish(MarkerArray(markers=[marker]))
+
+    def publish_footsteps(self, next_step=None):
+        """Publish executed + next footsteps to RViz as flat foot-shaped boxes,
+        matching the MuJoCo viewer overlay: orange = next planned step, fading
+        blue = left / red = right for the executed history (oldest = faintest).
+
+        The box geometry is shared with debug_viz.footstep_box so the two views
+        stay identical. Call once per tick like publish_com_trail.
+        """
+        now = self._node.get_clock().now().to_msg()
+        markers = MarkerArray()
+        # DELETEALL first: the history grows and marker ids shift each frame, so
+        # without this stale boxes from a longer previous frame would linger.
+        clear = Marker()
+        clear.header.frame_id = "world"
+        clear.header.stamp = now
+        clear.ns = "footsteps"
+        clear.action = Marker.DELETEALL
+        markers.markers.append(clear)
+
+        entries = []
+        hist = self.footstep_history
+        n = len(hist)
+        for age, fs in enumerate(reversed(hist)):
+            alpha = 0.2 + 0.55 * (1.0 - age / max(n, 1))
+            rgba = ((0.05, 0.25, 0.95, alpha) if fs.side == Side.LEFT
+                    else (0.85, 0.10, 0.05, alpha))
+            entries.append((fs, rgba))
+        if next_step is not None:
+            entries.append((next_step, (1.0, 0.5, 0.0, 0.9)))
+
+        for mid, (fs, rgba) in enumerate(entries):
+            markers.markers.append(self._footstep_marker(now, mid, fs, rgba))
+        self._footstep_pub.publish(markers)
+
+    def _footstep_marker(self, stamp, marker_id, footstep, rgba):
+        """One flat CUBE marker for a FootStep, using the same footprint sizing
+        and placement as debug_viz.footstep_box (so RViz matches MuJoCo)."""
+        center, half, R, rgba_arr = debug_viz.footstep_box(footstep, rgba=rgba)
+        quat = pin.Quaternion(np.asarray(R, dtype=float)).coeffs()  # [x,y,z,w]
+        m = Marker()
+        m.header.frame_id = "world"
+        m.header.stamp = stamp
+        m.ns = "footsteps"
+        m.id = marker_id
+        m.type = Marker.CUBE
+        m.action = Marker.ADD
+        m.pose.position.x = float(center[0])
+        m.pose.position.y = float(center[1])
+        m.pose.position.z = float(center[2])
+        m.pose.orientation.x = float(quat[0])
+        m.pose.orientation.y = float(quat[1])
+        m.pose.orientation.z = float(quat[2])
+        m.pose.orientation.w = float(quat[3])
+        # scale = full extents = 2 * half
+        m.scale.x = float(2.0 * half[0])
+        m.scale.y = float(2.0 * half[1])
+        m.scale.z = float(2.0 * half[2])
+        m.color.r, m.color.g, m.color.b, m.color.a = \
+            float(rgba_arr[0]), float(rgba_arr[1]), float(rgba_arr[2]), float(rgba_arr[3])
+        return m
 
     def publish(self):
         # Einheitlichen Zeitstempel generieren. Wird gespeichert, damit

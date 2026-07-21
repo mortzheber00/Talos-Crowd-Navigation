@@ -49,7 +49,7 @@ ARROW_SCALE = 3.0          # visual stretch so the slow v_cmd arrow is visible
 WALK_DURATION = 30.0       # [s] max walk time
 REACTIVE = True            # True: footsteps follow v_cmd; False: fixed WALK_MODE plan
 
-TURN_GAIN = 0.5            # fraction of the heading error turned per step (0 = fixed facing)
+TURN_GAIN = 1.0            # fraction of the heading error turned per step (0 = fixed facing)
 MAX_DYAW_DEG = 30.0        # [deg] max facing change per step
 ALTERNATE_YAW = True       # only the inside foot of a turn advances the heading, so the
                            # feet are never more than one dpsi apart in yaw and cannot
@@ -88,6 +88,10 @@ TOUCHDOWN_FZ = 475.0       # [N]
 #   ros2 run bullet_sims walking --ros-args -p scenario:=crossing -p pedestrian_sensor_data:=true )
 SCENARIO = "random"              # crowd scenario: head_on | crossing | circle | corridor | random
 PEDESTRIAN_SENSOR_DATA = True    # True: depth-camera perception; False: ground-truth states
+FOV_CAMERA = False        # True: also run the high-res front camera + point cloud
+                          # (depth_image_proc/RViz visualization only -- obstacle
+                          # perception always uses the 4 low-res surround cameras
+                          # regardless of this switch)
 
 
 ################################################################################
@@ -123,7 +127,7 @@ def _setup_crowd(simulator):
     return crowd
 
 
-def _create_robot(simulator):
+def _create_robot(simulator, enable_fov_camera=True):
     """Create the TSID wrapper and the MuJoCo Talos robot.
     Returns (tw, robot), or None if the TSID wrapper fails to build."""
     try:
@@ -131,7 +135,7 @@ def _create_robot(simulator):
     except Exception as e:
         print('Failed to create TSIDWrapper:', e)
         return None
-    robot = Talos(simulator)
+    robot = Talos(simulator, enable_fov_camera=enable_fov_camera)
     return tw, robot
 
 
@@ -840,7 +844,12 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
     node = robot._node
     obstacle_topic = ('obstacles/perceived' if PEDESTRIAN_SENSOR_DATA
                       else 'obstacles/ground_truth')
+    # ORCA plans from the CoM state on 'odom_com' (published at the control rate
+    # by robot.publish_com_odom()), NOT the base_link 'odom': the swaying pelvis
+    # velocity makes ORCA back the robot up, and the 30 Hz base-odom rate makes
+    # it hesitate near a crowd.
     orca_node = ORCAVelocityNode(goal=ROBOT_GOAL, obstacle_topic=obstacle_topic,
+                                 odom_topic='odom_com',
                                  radius=0.35, max_speed=1.5,
                                  desired_speed=1.2, safety_margin=0.2)
     executor = SingleThreadedExecutor()
@@ -888,9 +897,20 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
         # move the crowd (pedestrians avoid the robot via ground truth either way)
         crowd.update(conf.dt, external_agents=[(com[:2], vcom[:2], 0.35)])
 
-        # process pending ROS callbacks: the ORCA node consumes odom +
-        # obstacles and publishes cmd_vel; our cached nav.* values update here
-        executor.spin_once(timeout_sec=0.0)
+        # feed the ORCA node the fresh CoM state at ~200 Hz (every 5th 1 kHz
+        # tick) before spinning, so v_cmd tracks the robot closely -- the 30 Hz
+        # sensor-publish rate below is too coarse and makes it hesitate.
+        if i % 5 == 0:
+            robot.publish_com_odom()
+
+        # Drain ALL pending ROS callbacks so the ORCA round-trip
+        # (odom_com -> ORCA -> cmd_vel -> nav.v_cmd) completes within this tick.
+        # A single spin_once processes only one callback, leaving v_cmd several
+        # ticks stale -- that lag makes the robot hesitate near a crowd and the
+        # trajectory non-deterministic run-to-run. spin_once(0) is a cheap no-op
+        # once the queue is empty.
+        for _ in range(8):
+            executor.spin_once(timeout_sec=0.0)
         v_cmd = nav.v_cmd
         v_pref = nav.v_pref
 
@@ -949,6 +969,10 @@ def _run_loop(simulator, crowd, robot, mpc, interpolator, plan, ZMP_ref, YAW_ref
                                           rgba=(0.55, 0.0, 0.75, 0.85))
                    for p in robot.com_trail]
         debug_viz.draw_scene(simulator, arrows=arrows, points=points, boxes=boxes)
+        # mirror the MuJoCo CoM-trail path into RViz (same violet spheres)
+        robot.publish_com_trail()
+        # mirror the MuJoCo footstep boxes into RViz (orange next, blue/red history)
+        robot.publish_footsteps(next_step)
 
         # --- step transition: pick/plan the next footstep, build swing spline ---
         if i >= 0 and i % conf.no_sim_per_step == 0:
@@ -1158,16 +1182,19 @@ def _read_runtime_params():
         ros2 run bullet_sims walking --ros-args \
             -p scenario:=crossing -p pedestrian_sensor_data:=true
     """
-    global SCENARIO, PEDESTRIAN_SENSOR_DATA
+    global SCENARIO, PEDESTRIAN_SENSOR_DATA, FOV_CAMERA
     node = rclpy.create_node("walking_params")
     node.declare_parameter("scenario", SCENARIO)
     node.declare_parameter("pedestrian_sensor_data", PEDESTRIAN_SENSOR_DATA)
+    node.declare_parameter("fov_camera", FOV_CAMERA)
     SCENARIO = node.get_parameter("scenario").get_parameter_value().string_value
     PEDESTRIAN_SENSOR_DATA = node.get_parameter(
         "pedestrian_sensor_data").get_parameter_value().bool_value
+    FOV_CAMERA = node.get_parameter("fov_camera").get_parameter_value().bool_value
     node.destroy_node()
     print(f"[walking] scenario='{SCENARIO}'  "
-          f"pedestrian_sensor_data={PEDESTRIAN_SENSOR_DATA}")
+          f"pedestrian_sensor_data={PEDESTRIAN_SENSOR_DATA}  "
+          f"fov_camera={FOV_CAMERA}")
 
 
 def main():
@@ -1188,7 +1215,7 @@ def main():
     # crowd must be created before the robot (see _setup_crowd)
     crowd = _setup_crowd(simulator)
 
-    created = _create_robot(simulator)
+    created = _create_robot(simulator, enable_fov_camera=FOV_CAMERA)
     if created is None:
         return
     tw, robot = created

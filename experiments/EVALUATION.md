@@ -500,6 +500,45 @@ what the code held. If a value has to be chosen, the data says the robot's share
 can be raised toward 0.5 for insurance in the ped → 0 direction at no cost
 elsewhere.
 
+### Q-H (hard) — the reciprocity plane on a crowd that actually resists  → `figures/qhh_reciprocity_hard.png`
+
+Q-H at random ×8 was saturated — 100 % in 19 of 20 cells — so it could show no
+gradient, and its reading that "the robot's share barely matters" was really a
+statement that *nothing* was hard enough to need it. A calibration sweep
+(`qs_stress`, 100 runs) confirmed the cause: from 8 to 32 pedestrians the
+collision rate stays at exactly 0 % and only the effort rises (time to goal
+10 → 26 s, path ratio to 1.7). **Crowding costs time, not safety, while the
+crowd yields** — itself a third confirmation of Q-G. Failures appear only at 48
+pedestrians, so the plane was rerun there: `robot_responsibility ×
+ped_responsibility` at n = 48, 200 runs.
+
+At that density the two failure modes separate, and merging them into
+"collision-free success" (as Q-H did) hides the result. Split apart:
+
+**Collisions — the crowd's fault line.** Collisions occur *only* in the ped = 0
+column (crowd yields nothing): 20–70 % there, and **0 % in every other cell**.
+The robot's own share reduces them a little (70 % → 30 % as it rises from 0.2 to
+1.0) but never to zero. So even taking full responsibility, the robot cannot
+make itself safe against a dense crowd that does not yield — the clearest
+statement yet of the out-run limit from Q-B.
+
+**Timeouts — the robot's fault line.** Not finishing within 45 s concentrates in
+the robot = 0.0 row (60–90 %) and vanishes as the robot's share rises. A passive
+robot bogs down in a 48-body jam; median time to goal runs 29–41 s at
+robot = 0.0 against **11 s at robot = 1.0**. Liveness is entirely the robot's.
+
+So the hard crowd cleanly decouples the two axes: **safety follows the crowd,
+speed follows the robot.** This refines rather than contradicts Q-H — the robot's
+responsibility was not "irrelevant", it governs liveness; it only looked
+irrelevant at n = 8 because nothing there was hard enough to bog it down.
+
+Caveat, stated for the slide: with ghost pedestrians a dense jam is passable —
+the robot can tunnel through rather than go around — so at n = 48 the collision
+rate is honest but time-to-goal still *understates* how hard a physically solid
+crowd would be. And the timeout rate depends on the 45 s cap; a run needing 46 s
+is scored a failure. Both push the same way (the true difficulty is higher than
+shown), so the direction of every conclusion holds.
+
 ---
 
 ## 4. The story in one paragraph

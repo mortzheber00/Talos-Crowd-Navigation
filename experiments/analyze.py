@@ -1038,8 +1038,81 @@ def qh():
     print(t.to_string())
 
 
+def qhh():
+    """Q-H on a hard (48-pedestrian) crowd, where the plane is not saturated.
+
+    At this density the two failure modes separate, and the merged
+    'collision-free success' would hide that -- so this splits them: a collision
+    heatmap (the safety / reciprocity result) and a did-not-finish heatmap (the
+    liveness result), plus the effort. The two point in different directions,
+    which is the finding.
+    """
+    df = _load("qh_hard")
+    if df is None:
+        return
+    df = df.copy()
+    df["timeout"] = (~df["reached_goal"].astype(bool)) & (~df["collided"].astype(bool))
+    rrs = sorted(df["robot_responsibility"].unique())
+    prs = sorted(df["ped_responsibility"].unique())
+
+    def grid(fn):
+        M = np.full((len(rrs), len(prs)), np.nan)
+        for i, rr in enumerate(rrs):
+            for j, pr in enumerate(prs):
+                sel = df[(df.robot_responsibility == rr) &
+                         (df.ped_responsibility == pr)]
+                if len(sel):
+                    M[i, j] = fn(sel)
+        return M
+
+    COLL = grid(lambda s: s["collided"].mean())
+    TMO = grid(lambda s: s["timeout"].mean())
+    TG = grid(lambda s: s["t_goal_s"].median())
+
+    fig, axs = plt.subplots(1, 3, figsize=(15.5, 4.7))
+
+    def heat(ax, M, cmap, title, fmt, hi):
+        im = ax.imshow(M, cmap=cmap, vmin=0, vmax=hi, origin="lower", aspect="auto")
+        ax.set_xticks(range(len(prs))); ax.set_xticklabels(prs)
+        ax.set_yticks(range(len(rrs))); ax.set_yticklabels(rrs)
+        ax.set_xlabel("pedestrian responsibility  (crowd yields →)")
+        ax.set_ylabel("robot responsibility")
+        for i in range(len(rrs)):
+            for j in range(len(prs)):
+                if np.isfinite(M[i, j]):
+                    val = M[i, j]
+                    ax.text(j, i, fmt(val), ha="center", va="center", fontsize=9.5,
+                            color="#fff" if val > 0.55 * hi else INK)
+        ax.set_title(title, loc="left")
+        return im
+
+    heat(axs[0], COLL, "Reds", "Collisions  (crowd's fault line)",
+         lambda v: f"{100*v:.0f}", 1.0)
+    axs[0].text(0, len(rrs) - 0.5, "", fontsize=8)
+    heat(axs[1], TMO, "Purples", "Did not finish in 45 s  (robot's fault line)",
+         lambda v: f"{100*v:.0f}", 1.0)
+
+    im = heat(axs[2], TG, "Blues_r", "Median time to goal [s]",
+              lambda v: f"{v:.0f}", 45.0)
+    fig.colorbar(im, ax=axs[2], fraction=0.046, label="s")
+
+    fig.suptitle("Q-H (hard)  48 pedestrians: safety follows the crowd, speed "
+                 "follows the robot", x=0.02, ha="left", fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    _save(fig, "qhh_reciprocity_hard")
+
+    t = df.groupby(["robot_responsibility", "ped_responsibility"]).agg(
+        n=("success", "size"), collided=("collided", "mean"),
+        timeout=("timeout", "mean"),
+        collision_free=("success_collision_free", "mean"),
+        min_sep=("min_sep_m", "median"), t_goal=("t_goal_s", "median"),
+        path_ratio=("path_ratio", "median")).round(3)
+    t.to_csv(os.path.join(RESULTS, "table_qhh_reciprocity_hard.csv"))
+    print(t.to_string())
+
+
 ALL = dict(qa=qa, qb=qb, qb2=qb2, qc=qc, qc_traj=qc_traj, qd=qd, qe=qe, qf=qf,
-           qg=qg, qg2=qg2, qh=qh)
+           qg=qg, qg2=qg2, qh=qh, qhh=qhh)
 
 
 def main():

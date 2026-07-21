@@ -25,7 +25,7 @@ SLIDES = [
  dict(n=1, arc="setup", qid="", head="Crowd navigation for a Talos humanoid",
       sub="An evaluation of what the ORCA-on-a-biped stack actually does",
       body="""<p>MuJoCo · Talos · ORCA crowd · LIP-MPC + TSID walking controller.
-      <strong>800+ simulation runs</strong> across eight questions.</p>
+      <strong>1&thinsp;100+ simulation runs</strong> across ten questions.</p>
       <p class="muted">Lara Heidtmann · Florian Bohnes · Sebastián Serna · Moritz Heber · Nicolas Guenther</p>""",
       fig=None, take=None),
 
@@ -75,7 +75,7 @@ SLIDES = [
       sub="Headless sweeps, 10 seeds per condition, metrics to disk",
       body="""<div class="split">
       <div><h4>Setup</h4><ul>
-      <li>800+ runs, headless, 10 at a time</li>
+      <li>1&thinsp;100+ runs, headless, 10 at a time</li>
       <li>each run its own <code>ROS_DOMAIN_ID</code> — without it, parallel runs share a DDS
       domain and one run's ORCA steers on another's odometry</li>
       <li>10 seeds per condition; simulator otherwise deterministic (verified)</li>
@@ -85,12 +85,13 @@ SLIDES = [
       otherwise an undetected pedestrian silently vanishes from the safety statistics.</li>
       <li><strong>Samples after a fall are excluded</strong> from collision counts: a collapsed
       robot drifting into someone is not an avoidance failure.</li></ul></div></div>
-      <p style="margin-top:16px">Every one of the 827 runs, robot path overlaid and coloured by outcome —
-      the whole evaluation in one frame:</p>""",
+      <p style="margin-top:16px">Every <strong>ground-truth</strong> run, robot path overlaid and coloured by
+      outcome — the whole evaluation in one frame. The 42 depth-camera runs are held out here (they are a
+      different system — see Q-F) rather than pooled in:</p>""",
       ensemble=True, fig=None, take=None),
 
  dict(n=6, arc="setup", qid="method", head="Every experiment, every setting",
-      sub="833 runs · 11 sweeps · one variable at a time",
+      sub="1 133 runs · 13 sweeps · one variable at a time",
       body="""<h4>The baseline — held fixed unless a row below says otherwise</h4>
       <div class="tablewrap"><table class="data cfg"><tbody>
       <tr><td><code>scenario</code></td><td class="num">random</td>
@@ -142,6 +143,10 @@ SLIDES = [
       <tr class="added"><td class="qid">H</td><td><code>qh_reciprocity</code></td><td>robot_responsibility × ped_responsibility</td>
           <td class="num">{0, 0.2, 0.5, 1.0} × {0, 0.1, 0.2, 0.3, 0.5}</td>
           <td class="num">random × 8</td><td class="num">10</td><td class="num">200</td></tr>
+      <tr class="added"><td class="qid">—</td><td><code>qs_stress</code></td><td>n_peds × crowd_extent <span class="muted">(calibration)</span></td>
+          <td class="num">{8,16,24,32,48} × {5, 3} m</td><td class="num">random</td><td class="num">10</td><td class="num">100</td></tr>
+      <tr class="added"><td class="qid">H⁺</td><td><code>qh_hard</code></td><td>robot_resp × ped_resp <span class="muted">@ 48 peds</span></td>
+          <td class="num">{0,0.2,0.5,1.0} × {0,0.1,0.2,0.3,0.5}</td><td class="num">random × 48</td><td class="num">10</td><td class="num">200</td></tr>
       <tr><td class="qid">—</td><td><code>gif_runs</code></td><td>scenario <span class="muted">(18 s, early_stop off)</span></td>
           <td class="num">all six</td><td class="num">all six × 8</td><td class="num">1</td><td class="num">6</td></tr>
       </tbody></table></div>
@@ -150,7 +155,7 @@ SLIDES = [
       <strong>Breadth once, depth on one.</strong> Q-C establishes the system across all six scenarios;
       the parameter sweeps then hold scenario at <code>random × 8</code> so a cell-to-cell difference is
       attributable to the parameter, not the scene. Q-H across all six would have been 1 200 runs.<br>
-      <strong>791 of 833 runs use ground truth.</strong> Perception is an ablation (Q-F, Q-A), deliberately
+      <strong>1&thinsp;091 of 1&thinsp;133 runs use ground truth.</strong> Perception is an ablation (Q-F, Q-A), deliberately
       held out of the planner sweeps so a tracker bug could not be mistaken for a planner result — which
       mattered, since the radius estimator turned out to ratchet to 3–15 m.</p>""",
       fig=None, take=None),
@@ -208,7 +213,7 @@ SLIDES = [
       <tr><td class="num">0.30</td><td class="num">0.299</td><td class="num">1.02</td><td class="num">14.5 s</td><td class="num">1.075</td></tr>
       <tr><td class="num">0.45</td><td class="num">0.387</td><td class="num">0.93</td><td class="num">10.7 s</td><td class="num">1.024</td></tr>
       <tr class="best"><td class="num">0.60</td><td class="num">0.403</td><td class="num">0.76</td><td class="num">10.2 s</td><td class="num">1.016</td></tr>
-      <tr><td class="num">1.20 <span class="muted">(shipped)</span></td><td class="num">0.408</td><td class="num">0.45</td><td class="num">10.3 s</td><td class="num">1.048</td></tr>
+      <tr><td class="num">1.20 <span class="muted">(baseline)</span></td><td class="num">0.408</td><td class="num">0.45</td><td class="num">10.3 s</td><td class="num">1.048</td></tr>
       </tbody></table>
       <p>Achieved speed saturates at <b class="num">≈0.40 m/s</b>. Between 0.6 and 1.2 the robot asks for
       twice the speed and arrives <em>no sooner</em>.</p>""",
@@ -261,7 +266,7 @@ SLIDES = [
       <table class="data head"><thead><tr><th>ped_resp</th><th>head_on</th><th>crossing</th><th>random ×8</th></tr></thead><tbody>
       <tr><td class="num">0.0</td><td class="num ok">100 %</td><td class="num ok">100 %</td><td class="num bad">60 %</td></tr>
       <tr class="best"><td class="num">0.1</td><td class="num ok">100 %</td><td class="num ok">100 %</td><td class="num ok">100 %</td></tr>
-      <tr><td class="num">0.3 <span class="muted">(shipped)</span></td><td class="num ok">100 %</td><td class="num ok">100 %</td><td class="num ok">100 %</td></tr>
+      <tr><td class="num">0.3 <span class="muted">(baseline)</span></td><td class="num ok">100 %</td><td class="num ok">100 %</td><td class="num ok">100 %</td></tr>
       <tr><td class="num">0.5</td><td class="num ok">100 %</td><td class="num ok">100 %</td><td class="num ok">100 %</td></tr>
       </tbody></table>
       <p><strong>A sharp knee at 0.1.</strong> Once each pedestrian takes even 10 % of the avoidance,
@@ -270,11 +275,11 @@ SLIDES = [
       fig="qg2_ped_responsibility",
       take=("ok", "The honest refinement: the robot's avoidance is <em>sufficient for any crowd that can "
             "see it</em>, and useless against one that cannot. Q-G's 0 % is the blind extreme, not the "
-            "whole story. The shipped 0.3 sits safely past the knee.")),
+            "whole story. The 0.3 our sweeps hold sits safely past the knee.")),
 
  dict(n=13, arc="the resolution", qid="Q-H", head="Whose share is it — robot or crowd?",
       sub="200 runs crossing the robot's share with the crowd's",
-      body="""<p>Reference ORCA expects a pair's shares to sum to ≈1.0; the shipped default sums to only
+      body="""<p>Reference ORCA expects a pair's shares to sum to ≈1.0; the baseline pair sums to only
       0.2 + 0.3 = 0.5. So does the <em>total</em> matter, or <em>who</em> provides it?</p>
       <p><strong>The failure is a single column, not a diagonal.</strong> Every cell where the crowd takes
       even 10 % is 100 %. The robot's own share is a weak floor: in the fully-non-yielding column it lifts
@@ -285,9 +290,29 @@ SLIDES = [
       share, not the same total. A total of 1.0 gives 60 % (robot 1.0 + ped 0.0) or 100 % (robot 0.5 +
       ped 0.5). The split matters, not the sum — because the two agents are not symmetric.</p>""",
       fig="qh_reciprocity",
-      take=("ok", "The shipped (0.2, 0.3) sits deep in the safe interior. Q-H says the robot's 0.2 is "
-            "barely adding to what the crowd's 0.3 already handles — it could be raised for cheap "
-            "insurance toward the non-yielding corner.")),
+      take=("warn", "But random ×8 is too easy — 19 of 20 cells are 100 %, so this can't show a gradient. "
+            "Is the robot's share really that weak, or is nothing here hard enough to need it? Make it "
+            "harder.")),
+
+ dict(n=13, arc="the resolution", qid="Q-H hard", head="On a real crowd, the two jobs separate",
+      sub="Same plane at 48 pedestrians — where it finally bites",
+      body="""<p>Adding bodies alone doesn't make it dangerous: from 8 to 32 pedestrians collisions stay
+      at <b class="num">0 %</b> and only the effort climbs (time to goal 10 → 26 s). Failures appear at
+      <b class="num">48</b> — so the plane was rerun there, and the two failure modes split cleanly.</p>
+      <table class="data head"><thead><tr><th></th><th>collisions</th><th>timeouts</th><th>drives it</th></tr></thead><tbody>
+      <tr><td><strong>crowd yields nothing</strong> (ped = 0)</td><td class="num bad">20–70 %</td>
+          <td class="num">—</td><td>the <strong>crowd</strong></td></tr>
+      <tr><td><strong>robot stays passive</strong> (robot = 0)</td><td class="num">—</td>
+          <td class="num bad">60–90 %</td><td>the <strong>robot</strong></td></tr>
+      </tbody></table>
+      <p><strong>Safety follows the crowd; speed follows the robot.</strong> Collisions happen only when the
+      crowd yields nothing, and even a robot at full responsibility can't stop them there (out-run again).
+      Timeouts happen only when the robot is passive — it bogs down in the jam (29–41 s) where an active
+      robot walks through in 11 s.</p>""",
+      fig="qhh_reciprocity_hard",
+      take=("ok", "This refines Q-H, doesn't contradict it: the robot's share wasn't irrelevant, it governs "
+            "<em>liveness</em>. It only looked irrelevant at n = 8 because nothing was hard enough to bog "
+            "the robot down.")),
 
  dict(n=14, arc="the resolution", qid="Q-F", head="Perception costs the goal, provably not safety",
       sub="60 runs, paired by scenario and seed",
@@ -304,6 +329,9 @@ else:
       neighbour overlapping the robot, takes its already-colliding branch, and commands a full-speed
       escape — <code>|v_cmd|</code> sits at the 1.5 m/s cap for 97 % of the run.</p>""",
       fig="qf_perception",
+      ensemble_file="ensemble_perception.gif",
+      ensemble_caption="All 42 depth-camera runs: the robot flees phantoms and wanders — "
+                       "0 collided, 32 never arrive. A different failure from the ground-truth stack.",
       take=("fix", "Fix is a ceiling: <code>radius = min(radius, 0.6)</code>. The "
             "&ldquo;never under-estimate&rdquo; instinct is right; it just needs a bound.")),
 
@@ -323,9 +351,9 @@ else:
       <ul class="lim">
       <li>Pedestrians are ghosts — in the blind runs the robot passes <em>through</em> people without ever
       losing balance. With contact enabled the blind condition would look worse still.</li>
-      <li>The shipped crowd avoids the robot using <em>ground-truth</em> robot state — more cooperative and
+      <li>The crowd avoids the robot using <em>ground-truth</em> robot state — more cooperative and
       better informed than any real crowd. Q-G quantifies how much that flatters us: all of it.</li>
-      <li>The blind condition is one extreme and the shipped cooperative crowd the other; Q-G2 measures
+      <li>The blind condition is one extreme and the fully cooperative crowd the other; Q-G2 measures
       the middle, but a clean robot-only isolation (per-neighbour responsibility) was left unbuilt.</li>
       <li>Kinematic disks, not gait-driven humans. One robot, one goal, no static obstacles.</li></ul>""",
       fig=None, take=None),
@@ -352,7 +380,13 @@ def slide_html(s):
         parts.append(f'<div class="gifgrid">{cells}</div>')
     if s.get("ensemble"):
         parts.append(f'<figure><img src="{gif_raw("ensemble_all.gif")}" '
-                     f'alt="827 runs overlaid, coloured by outcome"></figure>')
+                     f'alt="ground-truth runs overlaid, coloured by outcome"></figure>')
+    if s.get("ensemble_file"):
+        cap = s.get("ensemble_caption", "")
+        parts.append(f'<figure><img src="{gif_raw(s["ensemble_file"])}" '
+                     f'alt="perception runs overlaid">'
+                     + (f'<figcaption>{cap}</figcaption>' if cap else '')
+                     + '</figure>')
     for key in ("fig", "fig2"):
         if s.get(key):
             parts.append(f'<figure><img src="{img(s[key])}" alt="{html.escape(s["qid"] or s["head"])} figure" loading="lazy"></figure>')
@@ -475,6 +509,7 @@ table.matrix code {{ font-size:11.5px; background:none; padding:0; color:var(--i
 figure {{ margin:20px 0 0; background:var(--plate); border:1px solid var(--rule); border-radius:8px;
   padding:9px; overflow-x:auto; }}
 figure img {{ display:block; width:100%; max-width:100%; height:auto; border-radius:3px; }}
+figcaption {{ font-size:12.5px; color:var(--ink2); padding:8px 4px 2px; }}
 .gifgrid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:18px; }}
 .gifgrid .gcell {{ margin:0; padding:6px; background:var(--plate); border:1px solid var(--rule);
   border-radius:8px; overflow:hidden; }}

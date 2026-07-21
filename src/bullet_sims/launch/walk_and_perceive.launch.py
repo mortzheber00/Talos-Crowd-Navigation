@@ -7,20 +7,29 @@ Starts:
 """
 
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from launch.substitutions import PathJoinSubstitution
 
 
 def generate_launch_description():
-    # Depth image processing (converts depth image to XYZ point cloud)
+    # High-res front camera + point cloud: off by default (RViz visualization
+    # only, not used by obstacle perception -- see walking.py's FOV_CAMERA).
+    fov_camera = LaunchConfiguration('fov_camera')
+    declare_fov_camera = DeclareLaunchArgument('fov_camera', default_value='false')
+
+    # Depth image processing (converts depth image to XYZ point cloud). Only
+    # useful while the walking node's front camera is enabled.
     depth_image_proc_launch = IncludeLaunchDescription(
         PathJoinSubstitution([
             FindPackageShare('bullet_sims'),
             'launch',
             'depth_image_proc.launch.py',
-        ])
+        ]),
+        condition=IfCondition(fov_camera),
     )
 
     # RViz visualization
@@ -33,15 +42,17 @@ def generate_launch_description():
     )
 
     # The stand_and_perceive simulation script
-    stand_and_perceive_node = Node(
+    walking_node = Node(
         package='bullet_sims',
-        executable='walk_and_perceive',
+        executable='walking',
         output='screen',
-        name='walk_and_perceive',
+        name='walking',
+        parameters=[{'fov_camera': fov_camera}],
     )
 
     return LaunchDescription([
-        stand_and_perceive_node,
+        declare_fov_camera,
+        walking_node,
         depth_image_proc_launch,
         ros_visuals_launch,
     ])

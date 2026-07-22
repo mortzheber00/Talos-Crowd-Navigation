@@ -12,21 +12,27 @@ WEBP = os.path.join(FIGS, "webp")
 GIFS = os.path.join(FIGS, "gifs")
 OUT = os.environ.get("DECK_OUT", os.path.join(HERE, "deck.html"))
 
+def _datauri(path, mime):
+    """Inline a file as a data URI, or None if it has not been generated yet
+    (partial-data previews skip the missing figure instead of crashing)."""
+    if not os.path.exists(path):
+        print(f"  [deck] missing, skipped: {os.path.relpath(path, HERE)}")
+        return None
+    with open(path, "rb") as f:
+        return f"data:{mime};base64," + base64.b64encode(f.read()).decode()
+
 def img(name):
-    with open(os.path.join(WEBP, name + ".webp"), "rb") as f:
-        return "data:image/webp;base64," + base64.b64encode(f.read()).decode()
+    return _datauri(os.path.join(WEBP, name + ".webp"), "image/webp")
 
 def gif(name):
-    with open(os.path.join(GIFS, "nav_" + name + ".gif"), "rb") as f:
-        return "data:image/gif;base64," + base64.b64encode(f.read()).decode()
+    return _datauri(os.path.join(GIFS, "nav_" + name + ".gif"), "image/gif")
 
 def gif_raw(fname):
-    with open(os.path.join(GIFS, fname), "rb") as f:
-        return "data:image/gif;base64," + base64.b64encode(f.read()).decode()
+    return _datauri(os.path.join(GIFS, fname), "image/gif")
 
 GIF_SCENS = [("empty", "Empty (control)"), ("head_on", "Head-on"),
-             ("crossing", "Crossing"), ("corridor", "Corridor"),
-             ("circle", "Circle"), ("random", "Random crowd")]
+             ("crossing", "Crossing"), ("corridor", "HBF Platform"),
+             ("circle", "Circle"), ("random", "Marienplatz")]
 
 SLIDES = [
  dict(n=1, arc="setup", qid="", head="Crowd navigation for a Talos humanoid",
@@ -382,21 +388,22 @@ def slide_html(s):
     parts.append(f'<div class="body">{s["body"]}</div>')
     if s.get("gifs"):
         cells = "".join(
-            f'<figure class="gcell"><img src="{gif(scen)}" alt="{html.escape(title)}">'
-            f'</figure>' for scen, title in GIF_SCENS)
+            f'<figure class="gcell"><img src="{uri}" alt="{html.escape(title)}">'
+            f'<figcaption>{html.escape(title)}</figcaption></figure>'
+            for scen, title in GIF_SCENS if (uri := gif(scen)))
         parts.append(f'<div class="gifgrid">{cells}</div>')
-    if s.get("ensemble"):
-        parts.append(f'<figure><img src="{gif_raw("ensemble_all.gif")}" '
+    if s.get("ensemble") and (uri := gif_raw("ensemble_all.gif")):
+        parts.append(f'<figure><img src="{uri}" '
                      f'alt="ground-truth runs overlaid, coloured by outcome"></figure>')
-    if s.get("ensemble_file"):
+    if s.get("ensemble_file") and (uri := gif_raw(s["ensemble_file"])):
         cap = s.get("ensemble_caption", "")
-        parts.append(f'<figure><img src="{gif_raw(s["ensemble_file"])}" '
+        parts.append(f'<figure><img src="{uri}" '
                      f'alt="perception runs overlaid">'
                      + (f'<figcaption>{cap}</figcaption>' if cap else '')
                      + '</figure>')
     for key in ("fig", "fig2"):
-        if s.get(key):
-            parts.append(f'<figure><img src="{img(s[key])}" alt="{html.escape(s["qid"] or s["head"])} figure" loading="lazy"></figure>')
+        if s.get(key) and (uri := img(s[key])):
+            parts.append(f'<figure><img src="{uri}" alt="{html.escape(s["qid"] or s["head"])} figure" loading="lazy"></figure>')
     if s.get("take"):
         kind, text = s["take"]
         parts.append(f'<div class="take {kind}">{text}</div>')

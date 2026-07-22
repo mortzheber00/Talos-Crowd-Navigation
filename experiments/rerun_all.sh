@@ -33,7 +33,12 @@ python3 experiments/run_sweep.py qa_solo --workers 1 >> "$PROG" 2>&1
 log "qa_solo done"
 
 # --- 2. deck-critical, then the rest (workers 10) ---------------------------
-for sw in qc_scenarios qf_perception qh_hard qab_timing \
+# Omitted on purpose:
+#   qh_hard    -- responsibility plane at 48 peds; implausible density, and the
+#                 hardened n=10 baseline already fails (re-target once chosen).
+#   qab_timing -- contended timing is not quoted (qa_solo covers it); its only
+#                 unique output was Q-B velocity tracking (re-run if wanted).
+for sw in qc_scenarios qf_perception \
           qd_responsibility qe_density qb2_speed \
           qg_cooperation qg2_ped_responsibility qh_reciprocity qs_stress; do
   log "$sw start"

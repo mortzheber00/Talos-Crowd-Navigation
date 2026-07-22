@@ -207,8 +207,12 @@ def qs_stress():
     plane saturates at the other end, which is equally uninformative.
     """
     runs = []
+    # 48 dropped: at that density the crowd is a wall of ghost disks the robot
+    # tunnels through -- not a plausible operating point (a 6x jump from the
+    # baseline). The hardened Marienplatz baseline already fails at n=10, so the
+    # failure onset is found well below here.
     for extent in (5.0, 3.0):
-        for n in (8, 16, 24, 32, 48):
+        for n in (8, 16, 24, 32):
             for seed in SEEDS:
                 runs.append(_base(n_peds=n, crowd_extent=extent, seed=seed,
                                   run_id=f"qs_e{extent}_n{n}_s{seed}"))

@@ -56,7 +56,7 @@
 
 % ---------------- topics: robot node -> orca ----------------
 \draw[topic] ($(talos.east)+(0,0.3)$) -- node[lab, above, pos=0.5]
-     {/odom\\[-1pt]nav\_msgs/Odometry @\,$\sim$30\,Hz} ($(orca.west)+(0,0.3)$);
+     {/odom\\[-1pt]nav\_msgs/Odometry @\,$\sim$200\,Hz} ($(orca.west)+(0,0.3)$);
 \draw[topic] ($(talos.east)+(0,-0.3)$) -- node[lab, below, pos=0.42]
      {/obstacles/perceived\\[-1pt]ObstacleArray @\,30\,Hz (default)} ($(orca.west)+(0,-0.3)$);
 

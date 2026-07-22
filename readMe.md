@@ -1,20 +1,9 @@
+# TALOS Crowd Navigation
+![TALOS walking through crowd](figures/TALOS_walking.gif)
+
 ## Install Instructions
 The Docker Container provided by the lecture was used, so dependencies should match.
 
-```bash
-docker pull ghcr.io/frustiger/tum-ics-ros:jazzy-legged-robotics-devel-vscode
-```
-
-The workspace should be recreated like this:
-
-```bash
-mkdir -p /workspaces/legged_robots/legged_robots_ws/src
-# copy the delivered src folder into /workspaces/legged_robots/legged_robots_ws/src
-cd /workspaces/legged_robots/legged_robots_ws
-source /opt/ros/rolling/setup.bash
-colcon build
-source install/setup.bash
-```
 
 Important: run every script and launch file from the workspace root, not from inside a package directory. The code loads URDFs and other assets using paths such as `src/talos_description/...`, so the workspace layout must stay intact.
 

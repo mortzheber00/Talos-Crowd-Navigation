@@ -11,13 +11,14 @@ from bullet_sims.tsid_wrapper import TSIDWrapper
 # robot configs
 import bullet_sims.talos_conf as conf
 from bullet_sims.footstep_planner import Side
+from orca_nav import debug_viz
 
 # ROS visualizations
 import rclpy
 from rclpy.node import Node
 from tf2_ros import TransformBroadcaster
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import WrenchStamped, TransformStamped
+from geometry_msgs.msg import WrenchStamped, TransformStamped, Point
 from visualization_msgs.msg import Marker, MarkerArray
 from sensor_msgs.msg import JointState, Image, CameraInfo
 from std_msgs.msg import Header
@@ -28,9 +29,10 @@ class Talos:
     combines wbc with pybullet, functions to read and set
     sensor values.
     """
-    def __init__(self, simulator):
+    def __init__(self, simulator, enable_fov_camera=True):
         self.conf = conf
         self.sim = simulator
+        self._fov_camera_enabled = enable_fov_camera
 
         # setup tsid wrapper for whole body controller
         # stack = stack of tasks in TSID framework
@@ -99,16 +101,17 @@ class Talos:
         self.depth_height = 480
         self.depth_fovy = 58.0  # vertical field of view in degrees
 
-        # Publishers for depth image and camera info
-        self.depth_pub = self._node.create_publisher(
-            Image, '/camera/depth/image_rect', 10
-        )
-        self.camera_info_pub = self._node.create_publisher(
-            CameraInfo, '/camera/depth/camera_info', 10
-        )
+        if self._fov_camera_enabled:
+            # Publishers for depth image and camera info
+            self.depth_pub = self._node.create_publisher(
+                Image, '/camera/depth/image_rect', 10
+            )
+            self.camera_info_pub = self._node.create_publisher(
+                CameraInfo, '/camera/depth/camera_info', 10
+            )
 
-        # Compute camera intrinsic matrix once at startup
-        self._compute_camera_intrinsics()
+            # Compute camera intrinsic matrix once at startup
+            self._compute_camera_intrinsics()
 
         # Mount the MuJoCo camera so it *coincides* with the URDF's existing
         # rgbd_optical_frame (published statically by robot_state_publisher as
@@ -128,7 +131,7 @@ class Talos:
         self.camera_pos = [0.066, 0.0, 0.1982]              # = URDF rgbd_link origin
         self.camera_orient = [0.5, -0.5, -0.5, 0.5]         # xyzw: cam frame == rgbd_optical_frame
 
-        if hasattr(self.sim, 'addCameraToLink'):
+        if self._fov_camera_enabled and hasattr(self.sim, 'addCameraToLink'):
             try:
                 self.sim.addCameraToLink(
                     self.camera_parent_link,
@@ -162,7 +165,9 @@ class Talos:
         self._percep_K = {}              # per-camera intrinsics
         percep_fovy, percep_w, percep_h = 90.0, 320, 240
         percep_radial = 0.15             # [m] mount offset along the view dir
-        if self._has_depth_cam:
+        # Independent of the FOV cam (self._has_depth_cam): perception must
+        # work even with the high-res front camera disabled.
+        if hasattr(self.sim, 'addCameraToLink'):
             try:
                 for k in range(4):
                     name = f'percep_cam_{k}'
@@ -181,10 +186,11 @@ class Talos:
                 print(f'[Talos] {len(self._percep_cams)} Rundumsicht-Kameras '
                       f'an {self.camera_parent_link} montiert')
             except Exception as e:
-                print(f'[Talos] Fehler: Rundumsicht-Kameras nicht verfügbar, '
-                      f'nutze nur die Frontkamera: {e}')
-                self._percep_cams = ['rgbd_depth_cam']
-                self._percep_K = {'rgbd_depth_cam': self.K}
+                print(f'[Talos] Fehler: Rundumsicht-Kameras nicht verfügbar: {e}')
+                if self._has_depth_cam:
+                    print('[Talos] nutze nur die Frontkamera als Fallback')
+                    self._percep_cams = ['rgbd_depth_cam']
+                    self._percep_K = {'rgbd_depth_cam': self.K}
 
         ########################################################################
         # 2D obstacle tracking (segmentation-based, for ORCA)
@@ -201,9 +207,23 @@ class Talos:
 
         self._joint_pub = self._node.create_publisher(JointState, 'joint_states', 10)
         self._odom_pub = self._node.create_publisher(Odometry, 'odom', 10)
+        # Center-of-mass state for the local planner (ORCA), on its own topic.
+        # ORCA must plan from the CoM, not the base_link odom above: the pelvis
+        # sways/bobs at the gait frequency, and feeding that oscillating base
+        # velocity into ORCA's reciprocal avoidance makes v_cmd flip and the
+        # robot back up near a crowd. Published at the control rate (see
+        # publish_com_odom), not the 30 Hz sensor rate, so v_cmd stays fresh.
+        self._com_odom_pub = self._node.create_publisher(Odometry, 'odom_com', 10)
         self._zmp_pub = self._node.create_publisher(MarkerArray, 'zmp', 10)
         self._wrench_rf_pub = self._node.create_publisher(WrenchStamped, 'wrench_rf', 10)
         self._wrench_lf_pub = self._node.create_publisher(WrenchStamped, 'wrench_lf', 10)
+        # CoM trail for RViz -- the same violet path drawn in the MuJoCo viewer
+        # overlay (debug_viz), so the two views match. See publish_com_trail.
+        self._trail_pub = self._node.create_publisher(MarkerArray, 'com_trail', 10)
+        # Executed + next footsteps for RViz -- the same foot-shaped boxes drawn
+        # in the MuJoCo overlay (see publish_footsteps).
+        self._footstep_pub = self._node.create_publisher(
+            MarkerArray, 'footsteps', 10)
         # obstacle-estimate overlay for RViz (used by publish_obstacle_markers)
         self.marker_pub = self._node.create_publisher(MarkerArray, 'obstacle_markers', 10)
         # obstacle estimates as DATA for downstream planners (ORCA); the marker
@@ -314,6 +334,95 @@ class Talos:
         """Recorded CoM positions, oldest first (bounded, decimated)."""
         return list(self._com_trail)
 
+    def publish_com_trail(self):
+        """Publish the recorded CoM trail to RViz as one violet SPHERE_LIST, so
+        RViz shows the exact path drawn in the MuJoCo viewer overlay.
+
+        Same look as debug_viz (violet spheres, radius 0.02, along com_trail);
+        a SPHERE_LIST keeps it to a single marker regardless of trail length.
+        Published in the ``world`` frame like the other RViz markers.
+        """
+        marker = Marker()
+        marker.header.frame_id = "world"
+        marker.header.stamp = self._node.get_clock().now().to_msg()
+        marker.ns = "com_trail"
+        marker.id = 0
+        marker.type = Marker.SPHERE_LIST
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        # sphere diameter = 2 * radius (0.02 m in the MuJoCo overlay)
+        marker.scale.x = marker.scale.y = marker.scale.z = 0.04
+        marker.color.r, marker.color.g, marker.color.b, marker.color.a = \
+            0.55, 0.0, 0.75, 0.85
+        # project onto the ground (z=0.02), exactly like the MuJoCo overlay --
+        # the raw CoM z (~0.87 m) would float the spheres in the air.
+        for p in self._com_trail:
+            pt = Point()
+            pt.x, pt.y, pt.z = float(p[0]), float(p[1]), 0.02
+            marker.points.append(pt)
+        self._trail_pub.publish(MarkerArray(markers=[marker]))
+
+    def publish_footsteps(self, next_step=None):
+        """Publish executed + next footsteps to RViz as flat foot-shaped boxes,
+        matching the MuJoCo viewer overlay: orange = next planned step, fading
+        blue = left / red = right for the executed history (oldest = faintest).
+
+        The box geometry is shared with debug_viz.footstep_box so the two views
+        stay identical. Call once per tick like publish_com_trail.
+        """
+        now = self._node.get_clock().now().to_msg()
+        markers = MarkerArray()
+        # DELETEALL first: the history grows and marker ids shift each frame, so
+        # without this stale boxes from a longer previous frame would linger.
+        clear = Marker()
+        clear.header.frame_id = "world"
+        clear.header.stamp = now
+        clear.ns = "footsteps"
+        clear.action = Marker.DELETEALL
+        markers.markers.append(clear)
+
+        entries = []
+        hist = self.footstep_history
+        n = len(hist)
+        for age, fs in enumerate(reversed(hist)):
+            alpha = 0.2 + 0.55 * (1.0 - age / max(n, 1))
+            rgba = ((0.05, 0.25, 0.95, alpha) if fs.side == Side.LEFT
+                    else (0.85, 0.10, 0.05, alpha))
+            entries.append((fs, rgba))
+        if next_step is not None:
+            entries.append((next_step, (1.0, 0.5, 0.0, 0.9)))
+
+        for mid, (fs, rgba) in enumerate(entries):
+            markers.markers.append(self._footstep_marker(now, mid, fs, rgba))
+        self._footstep_pub.publish(markers)
+
+    def _footstep_marker(self, stamp, marker_id, footstep, rgba):
+        """One flat CUBE marker for a FootStep, using the same footprint sizing
+        and placement as debug_viz.footstep_box (so RViz matches MuJoCo)."""
+        center, half, R, rgba_arr = debug_viz.footstep_box(footstep, rgba=rgba)
+        quat = pin.Quaternion(np.asarray(R, dtype=float)).coeffs()  # [x,y,z,w]
+        m = Marker()
+        m.header.frame_id = "world"
+        m.header.stamp = stamp
+        m.ns = "footsteps"
+        m.id = marker_id
+        m.type = Marker.CUBE
+        m.action = Marker.ADD
+        m.pose.position.x = float(center[0])
+        m.pose.position.y = float(center[1])
+        m.pose.position.z = float(center[2])
+        m.pose.orientation.x = float(quat[0])
+        m.pose.orientation.y = float(quat[1])
+        m.pose.orientation.z = float(quat[2])
+        m.pose.orientation.w = float(quat[3])
+        # scale = full extents = 2 * half
+        m.scale.x = float(2.0 * half[0])
+        m.scale.y = float(2.0 * half[1])
+        m.scale.z = float(2.0 * half[2])
+        m.color.r, m.color.g, m.color.b, m.color.a = \
+            float(rgba_arr[0]), float(rgba_arr[1]), float(rgba_arr[2]), float(rgba_arr[3])
+        return m
+
     def publish(self):
         # Einheitlichen Zeitstempel generieren. Wird gespeichert, damit
         # publish_depth_image() und publish_obstacle_markers() im selben Zyklus
@@ -371,6 +480,30 @@ class Talos:
             markers.markers.append(self._point_marker(now, 1, self.dcm, [0.0, 0.0, 1.0, 1.0]))
         self._zmp_pub.publish(markers)
 
+    def publish_com_odom(self):
+        """Publish the ground-plane CoM state (position + world-frame velocity)
+        as Odometry on ``odom_com`` -- the state the ORCA planner should use.
+
+        Kept separate from publish() so the walking loop can call it at the
+        control rate: the ORCA node recomputes v_cmd on every message here, so a
+        high rate keeps the command fresh (the 30 Hz sensor-publish rate makes
+        the robot hesitate near a crowd). It is cheap (no render), unlike the
+        rest of publish()."""
+        com = self.sim.computeComPosition(self.robot.id())
+        vcom = self.sim.computeComVelocity(self.robot.id())
+        odom = Odometry()
+        odom.header.stamp = self._node.get_clock().now().to_msg()
+        odom.header.frame_id = "world"
+        odom.child_frame_id = "com"
+        odom.pose.pose.position.x = float(com[0])
+        odom.pose.pose.position.y = float(com[1])
+        odom.pose.pose.position.z = float(com[2])
+        odom.pose.pose.orientation.w = 1.0
+        odom.twist.twist.linear.x = float(vcom[0])
+        odom.twist.twist.linear.y = float(vcom[1])
+        odom.twist.twist.linear.z = float(vcom[2])
+        self._com_odom_pub.publish(odom)
+
     @staticmethod
     def _pinhole_K(fovy_deg, width, height):
         """Pinhole intrinsics from the vertical field of view:
@@ -382,6 +515,38 @@ class Talos:
             [0.0, fy, height / 2.0],
             [0.0, 0.0, 1.0]
         ], dtype=np.float64)
+
+    @staticmethod
+    def _front_arc_estimate(xy, cam_xy):
+        """Estimate a cylinder's ground-plane (center, radius) from the front
+        arc a *single* camera sees.
+
+        ``xy`` are ground-projected surface points from ONE camera (Nx2) and
+        ``cam_xy`` is THAT camera's mount point. A camera only sees the front
+        arc, whose centroid sits ~2r/pi in front of the true axis along the
+        viewing ray; estimate r from the lateral chord (immune to that bias),
+        then push the centroid back onto the axis. Returns ``(center(2),
+        r_radius)`` where ``r_radius`` already covers the points actually seen.
+
+        Must be called per camera: merging points from cameras at different
+        yaw angles violates the single-front-arc assumption (the combined set
+        spans a wider arc than any one viewpoint), which places ``center`` off
+        the axis and makes the coverage distance below explode -- the source
+        of the radius inflation seen at camera seams.
+        """
+        centroid = xy.mean(axis=0)
+        ray = centroid - cam_xy
+        ray /= max(np.linalg.norm(ray), 1e-9)
+        lateral = xy @ np.array([-ray[1], ray[0]])
+        # robust chord + coverage via percentiles, not raw min/max: when an
+        # occluder splits the mask into a crescent/fragment, a few stray points
+        # sit far from the true axis and a raw max would blow the radius up.
+        r_est = 0.5 * (np.percentile(lateral, 97.5) - np.percentile(lateral, 2.5))
+        center = centroid + (2.0 / np.pi) * r_est * ray
+        # within one front arc the farthest point is ~r from the axis, so this
+        # stays bounded (unlike the same measure on a merged multi-view cloud)
+        cover = float(np.percentile(np.linalg.norm(xy - center, axis=1), 97.5))
+        return center, max(r_est, cover)
 
     def _compute_camera_intrinsics(self):
         """Intrinsic (K), projection (P) and distortion (D) parameters of the
@@ -527,14 +692,17 @@ class Talos:
                     for name in self._obstacle_geom_names}
 
         # --- gather world-frame ground points per geom from every camera ---
-        pts = {name: [] for name in geom_ids}    # world-xy arrays
+        # Keep each camera's contribution SEPARATE (points + that camera's own
+        # mount point + FOV-clip flag): the front-arc estimate below is only
+        # valid per single viewpoint, so points from cameras at different yaw
+        # angles must not be pooled before estimation.
+        pts = {name: [] for name in geom_ids}    # per-camera world-xy arrays
+        cams_xy = {name: [] for name in geom_ids}  # that camera's mount (ground)
         clip = {name: [] for name in geom_ids}   # FOV-clipped in that camera?
-        cam_xy = None                            # shared mount point (ground)
         for cam in self._percep_cams:
             depth, seg = self.sim.get_depth_and_seg_image(invalid_to=np.nan,
                                                           camera=cam)
             cam_pos, R_wc = self.sim.get_camera_pose(camera=cam)
-            cam_xy = cam_pos[:2]
             # MuJoCo cameras look along local -Z with +Y up; the pinhole
             # equations below use the ROS optical convention (+Z forward,
             # +Y down), so flip the Y and Z axes of the camera rotation.
@@ -556,6 +724,7 @@ class Talos:
                 Y = (v_pix - cy) * Z / fy            # +Y down
                 pts_w = (R_w_opt @ np.vstack((X, Y, Z))).T + cam_pos
                 pts[name].append(pts_w[:, :2])       # ground-plane projection
+                cams_xy[name].append(cam_pos[:2].copy())
                 clip[name].append(u_pix.min() == 0
                                   or u_pix.max() == depth.shape[1] - 1)
 
@@ -577,36 +746,64 @@ class Talos:
                         prev['vx'] = prev['vy'] = 0.0
                 continue
 
-            xy = np.vstack(pts[name])
-
-            centroid = xy.mean(axis=0)
-            # The cameras only see the front arc of the cylinder, whose
-            # centroid sits ~2r/pi in front of the true axis. Estimate r from
-            # the lateral chord (immune to that bias), then push the center
-            # away from the mount point along the viewing ray.
-            ray = centroid - cam_xy
-            ray /= max(np.linalg.norm(ray), 1e-9)
-            lateral = xy @ np.array([-ray[1], ray[0]])
-            r_est = 0.5 * (lateral.max() - lateral.min())
-            center = centroid + (2.0 / np.pi) * r_est * ray
-            # 10% safety padding on top of whatever the points actually cover
-            radius = 1.10 * max(r_est,
-                                float(np.max(np.linalg.norm(xy - center, axis=1))))
-            # Partial visibility makes the chord underestimate r -- and an
-            # underestimated radius is unsafe for ORCA. Two guards:
-            #  * every contributing mask touches its left/right image border
+            # Estimate (center, radius) PER camera, where the single-front-arc
+            # model holds, then fuse -- never pool points across viewpoints
+            # first (that inflates the radius at camera seams). Two per-view
+            # filters keep a bad view from driving the fit:
+            #  * too-thin sliver (< the per-camera minimum) -> skip;
+            #  * FOV border-clipped arc -> the chord is cut off, so its center
+            #    and radius are unreliable; skip it as long as some clean
+            #    (unclipped, non-sliver) view remains. This is the seam case
+            #    clip=[True, False]: use only the camera that sees the whole arc.
+            # If nothing clean survives (all slivers or all clipped), fall back
+            # to the pooled points so a split-but-visible track still gets an
+            # estimate.
+            has_clean = any((not cl) and len(p) >= self.MIN_OBSTACLE_PIXELS
+                            for p, cl in zip(pts[name], clip[name]))
+            centers, radii, weights = [], [], []
+            for p, cxy, cl in zip(pts[name], cams_xy[name], clip[name]):
+                if len(p) < self.MIN_OBSTACLE_PIXELS:
+                    continue
+                if has_clean and cl:
+                    continue
+                c, r = self._front_arc_estimate(p, cxy)
+                centers.append(c)
+                radii.append(r)
+                weights.append(len(p))
+            if centers:
+                w = np.asarray(weights, dtype=float)
+                w /= w.sum()
+                center = (np.asarray(centers) * w[:, None]).sum(axis=0)
+                # each per-view radius is bounded ~r, so the max across views
+                # is safe (never under-estimates) without inflating
+                r_cover = max(radii)
+            else:
+                xy = np.vstack(pts[name])
+                center, r_cover = self._front_arc_estimate(
+                    xy, cams_xy[name][int(np.argmax([len(p) for p in pts[name]]))])
+            # 15% safety padding on top of whatever the points actually cover
+            # (the percentile coverage above trims the outermost points, so this
+            # keeps a healthy margin over the true radius for a well-seen agent)
+            radius = 1.15 * r_cover
+            # A pedestrian is a rigid body: its true radius is constant, so any
+            # large frame-to-frame change is measurement error. Two guards:
+            #  * if every contributing mask touches its left/right image border
             #    (adjacent cameras overlap at the seams, so a genuinely
-            #    complete arc is never border-clipped in ALL views):
-            #    hold the previous radius outright;
-            #  * otherwise limit shrinking to 1% per frame, so a sliver left
-            #    by a passing occluder cannot collapse the radius before the
-            #    mask drops below MIN_OBSTACLE_PIXELS (-> stale hold). A rigid
-            #    agent's radius never genuinely shrinks that fast.
+            #    complete arc is never border-clipped in ALL views) the chord is
+            #    cut off and can only under-estimate: hold, don't shrink;
+            #  * otherwise clamp the change to +/-1% per frame. Symmetric on
+            #    purpose: a passing occluder that leaves a thin sliver can make
+            #    the single-frame estimate collapse OR spike (an occluder
+            #    fragment's stray points survive even a robust percentile), and
+            #    neither should move the radius before the mask drops below
+            #    MIN_OBSTACLE_PIXELS (-> stale hold). Legitimate change (an agent
+            #    resolving as it nears) is gradual and tracks fine at 1%/frame.
             if prev is not None:
                 if all(clip[name]):
                     radius = max(radius, prev['r'])
                 else:
-                    radius = max(radius, 0.99 * prev['r'])
+                    radius = float(np.clip(radius,
+                                           0.99 * prev['r'], 1.01 * prev['r']))
 
             if prev is None or dt is None or dt <= 0.0:
                 vx = vy = 0.0                        # first sighting: EMA starts next frame

@@ -42,8 +42,9 @@ class ORCAVelocityNode(Node):
     """Publishes the ORCA velocity command computed from topic inputs."""
 
     def __init__(self, goal=(0.0, 0.0), obstacle_topic='obstacles/ground_truth',
-                 radius=0.35, max_speed=0.4, desired_speed=0.25,
-                 safety_margin=0.2, node_name='orca_planner', **orca_kwargs):
+                 odom_topic='odom', radius=0.35, max_speed=0.4,
+                 desired_speed=0.25, safety_margin=0.2,
+                 node_name='orca_planner', **orca_kwargs):
         """
         Args:
             goal (array-like, 2): initial navigation goal in the world plane [m]
@@ -64,6 +65,7 @@ class ORCAVelocityNode(Node):
         self.declare_parameter('goal_x', float(goal[0]))
         self.declare_parameter('goal_y', float(goal[1]))
         self.declare_parameter('obstacle_topic', obstacle_topic)
+        self.declare_parameter('odom_topic', odom_topic)
         self.declare_parameter('radius', float(radius))
         self.declare_parameter('max_speed', float(max_speed))
         self.declare_parameter('desired_speed', float(desired_speed))
@@ -72,6 +74,7 @@ class ORCAVelocityNode(Node):
         goal = (self.get_parameter('goal_x').value,
                 self.get_parameter('goal_y').value)
         obstacle_topic = self.get_parameter('obstacle_topic').value
+        odom_topic = self.get_parameter('odom_topic').value
 
         self.ctrl = RobotORCA(
             goal,
@@ -85,7 +88,7 @@ class ORCAVelocityNode(Node):
         # exact neighbour format RobotORCA.compute_velocity expects
         self._obstacles = []
 
-        self.create_subscription(Odometry, 'odom', self._odom_cb, 10)
+        self.create_subscription(Odometry, odom_topic, self._odom_cb, 10)
         self.create_subscription(ObstacleArray, obstacle_topic,
                                  self._obstacles_cb, 10)
         self.create_subscription(PoseStamped, 'goal_pose', self._goal_cb, 10)

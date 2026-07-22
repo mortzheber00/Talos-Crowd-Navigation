@@ -88,6 +88,26 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /zmp
+    - Class: rviz_default_plugins/MarkerArray
+      Name: CoMTrail
+      Enabled: true
+      Namespaces: {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /com_trail
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Footsteps
+      Enabled: true
+      Namespaces: {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /footsteps
   Enabled: true
   Name: root
   Tools:

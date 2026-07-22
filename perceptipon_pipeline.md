@@ -167,14 +167,17 @@ R_w_opt = R_wc @ diag([1, -1, -1])
 pts_w = (R_w_opt @ [X, Y, Z].T).T + cam_pos
 ```
 
-### Frontflächen-Bias-Korrektur
+### Frontflächen-Bias-Korrektur (pro Kamera)
 ```python
-# Kamera sieht nur vordere Bogenoberfläche
-# Centroid liegt ~2r/π vor der echten Achse
-ray = normalized(centroid - cam_pos_xy)
-r_est = (lateral_max - lateral_min) / 2
-center_true = centroid + (2/π) * r_est * ray
-radius = 1.10 * max(r_est, max_distance_to_center)
+# WICHTIG: pro Kamera, nicht auf der gemergten Wolke (siehe "Warum NICHT naiv
+# mergen"). Kamera sieht nur den vorderen Bogen; Centroid liegt ~2r/π vor der
+# echten Achse entlang des Sichtstrahls.
+ray    = normalized(centroid - cam_pos_xy)            # cam_pos DIESER Kamera
+r_est  = (perc(lateral, 97.5) - perc(lateral, 2.5)) / 2   # robuster Chord
+center = centroid + (2/π) * r_est * ray
+cover  = perc(||xy - center||, 97.5)                  # robuste Abdeckung
+r_view = max(r_est, cover)                            # Radius aus DIESER Sicht
+# Fusion + Padding + zeitlicher Guard: siehe Datenfluss unten
 ```
 
 ### Woher kommt der Faktor $\frac{2r}{\pi}$? 
@@ -216,12 +219,14 @@ v_smooth = α * v_raw + (1 - α) * v_prev
 
 | Problem | Grund | Lösung |
 |---------|-------|--------|
-| **Frontflächen-Bias** | Nur vorderer Bogen sichtbar, Schwerpunkt sitzt vorn | 2r/π-Korrektion entlang Sichtstrahl |
-| **FOV-Randclipping** | Seitlicher Zylinderumriss wird abgeschnitten | Radius-Clipping: `radius = max(radius, prev_r)` |
-| **Verdeckungs-Kollaps** | Okklusion → dünne Maske → r_est→0 | Schrumpf-Limit: `radius >= 0.99 * prev_r` |
+| **Frontflächen-Bias** | Nur vorderer Bogen sichtbar, Schwerpunkt sitzt vorn | 2r/π-Korrektion entlang Sichtstrahl (pro Kamera) |
+| **Naht-Inflation** | Merge zweier Blickwinkel → breiter Bogen → `center` daneben → Radius ~2× | Pro Kamera schätzen, dann fusionieren (nicht `vstack`-fitten) |
+| **FOV-Randclipping** | Seitlicher Zylinderumriss abgeschnitten → verzerrter Chord | Geclippte Sicht verwerfen, solange eine saubere Sicht existiert |
+| **Occluder-Sichel-Spike** | Verdeckungs-Fragment → Streupunkte weit von Achse | Robuste Perzentile (2.5/97.5) statt roher min/max |
+| **Verdeckungs-Kollaps / Spike-Ratchet** | Dünne Maske → r springt hoch *oder* runter | Symmetrisches ±1%/Frame-Clamp (starrer Körper) |
 | **Wiederaufnahme-Sprung** | Track re-emerges an anderem Ort → v_raw explodiert | `v_raw = clip(v_raw, ±3 m/s)` |
-| **Sensor-Rauschen** | Einzelne Pixel verschieben Centroid | EMA mit α=0.3 dämpft |
-| **Leere Maske** | Vollständige Verdeckung | `stale=True`, letzten Wert halten |
+| **Sensor-Rauschen** | Einzelne Pixel verschieben Centroid | EMA (Position α=0.5, Velocity α=0.15) dämpft |
+| **Leere Maske** | Vollständige Verdeckung | `stale=True`, letzten Wert halten, nach 1 s droppen |
 
 ## Performance (Verifizierung headless, `MUJOCO_GL=egl`)
 
@@ -348,50 +353,65 @@ for cam in [percep_cam_0 .. percep_cam_3]:
         mask = segmentation-Maske für Geom-ID
         (u, v, Z) -> Pinhole-Rückprojektion mit cam-eigenem K
         pts_world = (R_w_opt @ [X,Y,Z]).T + cam_pos
-        pts[geom_name].append(pts_world[:, :2])   # sammelt über alle 4 Kameras
+        pts[geom_name].append(pts_world[:, :2])   # je Kamera SEPARAT gehalten
+        cams_xy[geom_name].append(cam_pos[:2])    # + Mount DIESER Kamera
 
-# nach der Kamera-Schleife, pro Geom:
-xy = np.vstack(pts[geom_name])   # <- der eigentliche "Merge"
-centroid, radius, center = wie im Single-Cam-Fall (2r/pi-Korrektur etc.)
+# nach der Kamera-Schleife, pro Geom: NICHT alle Punkte mergen und einmal fitten,
+# sondern pro (sauberer, unclipped) Kamera schätzen -> dann fusionieren:
+per_view = [front_arc_estimate(p, cxy) for p, cxy in saubere Sichten]
+center   = punktzahl-gewichteter Mittelwert der per-view centers
+r_cover  = max(per-view radii)          # jeder ~r-begrenzt -> keine Inflation
+radius   = 1.15 * r_cover                # Padding
+radius   = clip(radius, 0.99*prev_r, 1.01*prev_r)   # ±1%/Frame (starrer Körper)
 ```
 
-### Wie der Punktwolken-Merge fehlerfrei funktioniert
+### Warum NICHT naiv mergen: Radius-Inflation an den Nähten
 
-Der Merge ist absichtlich so simpel wie möglich gehalten: **kein** ICP, **keine**
-Kalman-Fusion, **keine** Gewichtung zwischen Kameras — nur ein `np.vstack` der
-Weltkoordinaten-Punktlisten. Das funktioniert fehlerfrei, weil:
+Der naheliegende Ansatz — alle 4 Punktwolken per `np.vstack` in einen Topf werfen
+und **einmal** die Front-Arc-Schätzung darauf rechnen — **funktioniert nicht**.
+Er blähte den geschätzten Radius an Kamera-Nähten auf bis zu ~2× GT auf (0.3 m →
+0.43–0.56 m). Der Grund ist geometrisch:
 
-1. **Jede Kamera transformiert unabhängig korrekt ins Weltframe.** `get_camera_pose(camera=cam)`
-   liefert `cam_pos`/`R_wc` für genau diese eine Kamera; die Rückprojektion nutzt
-   deren eigenes `K` und deren eigene Rotation. Ein Punkt, der von `percep_cam_2`
-   stammt, landet also an derselben Weltkoordinate wie ein Punkt derselben
-   Zylinderoberfläche, gesehen von `percep_cam_0` — es gibt keinen gemeinsamen,
-   potenziell fehlerhaften Zwischenschritt.
-2. **Der 0.15 m Montageversatz zwischen den 4 Kameras ist vernachlässigbar**
-   gegenüber typischen Fußgänger-Abständen (Meter-Bereich). Die vier Kameras
-   verhalten sich für die Geometrie der Szene praktisch wie eine einzelne
-   omnidirektionale Kamera an einem Punkt — deshalb ist ein reines "alle Punkte
-   in einen Topf werfen" ohne Registrierung zulässig.
-3. **Überlappende Sichtfelder an den Nähten** (106° FOV bei 90°-Rasterung)
-   stellen sicher, dass ein Objekt an einer Kamerakante nie komplett aus dem Bild
-   fällt, sondern von der Nachbarkamera mit aufgenommen wird.
-4. **Der Rand-Clip-Guard nutzt genau diese Überlappung**: Für jede Kamera wird
-   vermerkt, ob deren Beitrag zu einem Geom den linken/rechten Bildrand berührt
-   (`clip[name]`). Nur wenn *alle* beitragenden Kameras gleichzeitig
-   randclippen (`all(clip[name])`), wird der alte Radius beibehalten — denn ein
-   wirklich vollständig sichtbarer Bogen kann wegen der Überlappung nie in
-   *allen* Ansichten gleichzeitig abgeschnitten sein. Andernfalls greift nur das
-   1%/Frame-Schrumpf-Limit.
-5. **`MIN_OBSTACLE_PIXELS` wird über alle 4 Kameras summiert**, nicht pro Kamera
-   geprüft — ein Track gilt erst als verdeckt/verloren, wenn er in *keiner* der
-   vier Sichten mehr genug Pixel liefert. Das verhindert unnötige Stale-Marker,
-   wenn z. B. nur eine Kamera durch einen anderen Fußgänger kurz verdeckt ist.
+Die Front-Arc-Korrektur (2r/π entlang *eines* Sichtstrahls) setzt voraus, dass die
+Punkte **einen** vorderen Bogen aus **einer** Blickrichtung bilden. Ein Fußgänger
+an der Naht wird aber von zwei ~90° auseinander stehenden Kameras gesehen; die
+gemergte Wolke spannt einen **breiteren Bogen**, als eine einzelne Sicht je zeigen
+könnte. Dann liegt der Centroid nicht mehr 2r/π vor der Achse, der eine Strahl
+passt zu keiner der beiden Sichten, `center` landet **neben** der echten Achse,
+und der `max(||xy − center||)`-Term greift einen weit entfernten Punkt → Radius
+explodiert. (Zusätzlich nutzte der naive Code `cam_pos` nur der *letzten* Kamera.)
 
-Der verbleibende Fehler nach dem Merge ist geometrisch identisch zum Single-Cam-Fall
-(Frontflächen-Bias, Pixelquantisierung) — der Merge selbst führt keine neue
-Fehlerquelle ein, er vergrößert lediglich die Anzahl der zur Schätzung
-beitragenden Oberflächenpunkte und die Wahrscheinlichkeit, dass ein Objekt
-überhaupt sichtbar ist.
+**Der Fix: pro Kamera schätzen, dann fusionieren.**
+
+1. **Pro Kamera** wird `_front_arc_estimate(pts_cam, cam_xy)` gerechnet — dort
+   gilt das Ein-Blickrichtung-Modell exakt, mit der *eigenen* Kamerapose. Ergebnis
+   je Sicht: ein Center und ein Radius.
+2. **Fusion**: punktzahl-gewichteter Mittelwert der Center; der Radius ist das
+   `max` der Einzelradien. Da jeder Einzelradius durch die Geometrie auf ~r
+   begrenzt ist, ist das `max` sicher (nie Unterschätzung) **ohne** aufzublähen.
+3. **Geclippte Sichten fliegen raus**, solange eine saubere (unclipped, ≥
+   `MIN_OBSTACLE_PIXELS`) Sicht existiert: ein am Bildrand abgeschnittener Bogen
+   liefert eine verzerrte Chord/Center-Schätzung. Das ist der typische Naht-Fall
+   `clip=[True, False]` → nur die Kamera nutzen, die den ganzen Bogen sieht.
+4. **Robuste Statistik** in der Schätzung: Chord und Abdeckung über Perzentile
+   (2.5/97.5) statt roher min/max, damit Streupunkte einer Occluder-Sichel den
+   Radius nicht hochziehen.
+5. **Zeitlicher Guard**: der Radius darf sich pro Frame nur um ±1 % ändern
+   (symmetrisch). Ein starrer Körper ändert seinen Radius nicht sprunghaft, also
+   kann ein Ein-Frame-Ausreißer ihn weder kollabieren noch aufblähen. (Der frühere
+   nur-Schrumpf-Guard `≥ 0.99·prev` *ratchete* Spikes ~0.5 s lang fest.)
+
+**Weiterhin gilt:** Jede Kamera transformiert unabhängig korrekt ins Weltframe
+(eigenes `K`, eigene Pose — kein gemeinsamer Fehler-Zwischenschritt), der 0.15 m
+Montageversatz ist gegenüber Fußgänger-Abständen vernachlässigbar, und
+`MIN_OBSTACLE_PIXELS` wird über alle 4 Kameras **summiert** (ein Track gilt erst
+als verdeckt, wenn ihn *keine* Sicht mehr ausreichend zeigt).
+
+Verifiziert (headless, `random`): max. Radius 0.561 → **0.425 m**, Anteil > 0.36 m
+von **28.9 % → 0.5 %**, Ausreißer > 0.45 m von 80 → **0**, Naht-Fälle (2 Kameras)
+im Mittel 0.383 → **0.308 m**; Roboter erreicht weiter das Ziel. Nahe Fußgänger
+(kollisionsrelevant) lesen ≥ GT; nur ferne minimal darunter, wachsen aber bei
+1 %/Frame rechtzeitig ein.
 
 ## Vor- und Nachteile
 

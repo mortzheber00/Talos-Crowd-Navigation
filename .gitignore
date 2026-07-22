@@ -18,11 +18,18 @@ __pycache__/
 *.log
 MUJOCO_LOG.TXT
 
+# LaTeX build artifacts (figures/)
+*.aux
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
 # Devcontainer (may be OS specific)
 .devcontainer/
 
 # mac os bullshit 
 .DS_Store
+*.DS_Store
 
 # evaluation sweep outputs (regenerate with experiments/run_sweep.py)
 experiments/results/

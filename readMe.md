@@ -128,6 +128,11 @@ watched, recorded (`ros2 bag`) or replaced from outside, and any component
 could later be moved into its own process with a remap instead of a code
 change.
 
+![System architecture: nodes, ROS topics and rates](figures/system_architecture.png)
+
+*Solid arrows are ROS topics (observable, remappable); dashed arrows are
+direct in-process calls. Blue boxes are this project's nodes.*
+
 **The nodes and the data flow:**
 
 ```

@@ -1,9 +1,16 @@
-"""Generate the evaluation slide deck with figures inlined as data URIs."""
+"""Generate the evaluation slide deck with figures inlined as data URIs.
+
+Paths are derived from this file's location so the deck rebuilds from any
+checkout. WEBP holds convert(1)-compressed copies of experiments/figures/*.png
+(regenerate them with experiments/regenerate.sh). Override the output path with
+the DECK_OUT environment variable."""
 import base64, os, html
 
-WEBP = "/home/sebas/.claude/jobs/73529903/tmp/webp"
-GIFS = "/home/sebas/Documents/university/TUM/Master/SS26/LR/talos_crowd_navigation/.claude/worktrees/evaluation/experiments/figures/gifs"
-OUT = "/home/sebas/.claude/jobs/73529903/deck.html"
+HERE = os.path.dirname(os.path.abspath(__file__))
+FIGS = os.path.join(HERE, "figures")
+WEBP = os.path.join(FIGS, "webp")
+GIFS = os.path.join(FIGS, "gifs")
+OUT = os.environ.get("DECK_OUT", os.path.join(HERE, "deck.html"))
 
 def img(name):
     with open(os.path.join(WEBP, name + ".webp"), "rb") as f:

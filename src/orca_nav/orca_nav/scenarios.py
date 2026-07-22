@@ -18,12 +18,21 @@ def head_on(crowd, gap=6.0, offset=0.2):
     return crowd
 
 
-def crossing(crowd, gap=6.0):
-    """Two streams crossing at 90 degrees through the origin."""
-    crowd.add(position=[-gap / 2,  0.0], goal=[gap / 2, 0.0],  on_arrival="reverse")
-    crowd.add(position=[ 0.0, -gap / 2], goal=[0.0, gap / 2],  on_arrival="reverse")
-    crowd.add(position=[-gap / 2,  1.0], goal=[gap / 2, 1.0],  on_arrival="reverse")
-    crowd.add(position=[ 1.0, -gap / 2], goal=[1.0, gap / 2],  on_arrival="reverse")
+def crossing(crowd, n=6, span=6.0, x_lo=1.0, x_hi=3.5, speed=1.2):
+    """A perpendicular stream cutting across the robot's +x route.
+
+    ``n`` pedestrians walk along +/-y (alternating direction so it reads as a
+    two-way crossing) at ``n`` x-stations spread over the robot's path between
+    ``x_lo`` and ``x_hi``. Centred on the route rather than on the origin so the
+    robot meets the flow mid-walk instead of at its own spawn -- the old
+    origin-centred layout let the robot clear the intersection before the crowd
+    arrived.
+    """
+    xs = np.linspace(x_lo, x_hi, n)
+    for k, x in enumerate(xs):
+        y0, y1 = (span / 2, -span / 2) if k % 2 == 0 else (-span / 2, span / 2)
+        crowd.add(position=[x, y0], goal=[x, y1],
+                  max_speed=speed, on_arrival="reverse")
     return crowd
 
 
@@ -39,26 +48,45 @@ def circle(crowd, n=8, radius=4.0, jitter=0.15):
     return crowd
 
 
-def corridor(crowd, n_each=3, length=8.0, width=1.6, speed=1.2):
-    """Two opposing files in a corridor of the given width — a bidirectional
-    flow that ORCA typically resolves into lanes."""
+def corridor(crowd, n_each=3, length=8.0, width=1.6, fast=1.3, slow=0.5):
+    """'HBF Platform': two opposing files along the robot's axis with MIXED
+    walking speeds.
+
+    Half the pedestrians walk faster than the robot can (``fast``, commuters
+    catching a train) and half stroll at roughly its own achievable pace
+    (``slow``), so the robot has to both be overtaken by the quick ones and
+    thread around the slow ones. The speed is alternated per lane and flipped
+    between the two directions so each file is a mix, not a fast lane and a slow
+    lane.
+    """
     ys = np.linspace(-width / 2, width / 2, n_each)
-    for y in ys:
+    for k, y in enumerate(ys):
+        spd_fwd = fast if k % 2 == 0 else slow   # file walking +x (with the robot)
+        spd_bwd = slow if k % 2 == 0 else fast   # file walking -x (against it)
         crowd.add(position=[-length / 2, y], goal=[length / 2, y],
-                  max_speed=speed, on_arrival="reverse")
+                  max_speed=spd_fwd, on_arrival="reverse")
         crowd.add(position=[length / 2, -y], goal=[-length / 2, -y],
-                  max_speed=speed, on_arrival="reverse")
+                  max_speed=spd_bwd, on_arrival="reverse")
     return crowd
 
 
 def random_crowd(crowd, n=12, extent=5.0, min_start_gap=1.0, seed=0,
-                 clear_radius=0.0, clear_centre=(0.0, 0.0)):
-    """N pedestrians with random, non-overlapping starts and random goals.
+                 clear_radius=0.0, clear_centre=(0.0, 0.0),
+                 goal_share=0.0, shared_goal=None):
+    """'Marienplatz': N pedestrians with random, non-overlapping starts.
 
     ``clear_radius`` keeps starts out of a disk around ``clear_centre`` (the
     robot's spawn). Without it a pedestrian can materialise on top of the robot,
     which scores as a collision before the run has begun -- a spawn artefact, not
     an avoidance failure.
+
+    ``goal_share`` is the fraction of pedestrians sent to ``shared_goal`` (the
+    robot's own goal, jittered) instead of a random one. With a purely random
+    goal most pedestrians drift off *behind* the robot and it walks to an empty
+    target -- a de-facto second control. Routing a share of the crowd to the same
+    goal makes them converge on the robot's destination like a crowd crossing a
+    busy square, so encounters near the goal are guaranteed rather than left to
+    chance.
     """
     rng = np.random.default_rng(seed)
     centre = np.asarray(clear_centre, dtype=float)
@@ -90,8 +118,15 @@ def random_crowd(crowd, n=12, extent=5.0, min_start_gap=1.0, seed=0,
         print(f"[scenarios] WARNING: placed only {len(starts)}/{n} pedestrians "
               f"at the {floor:.2f} m floor -- the box is saturated")
 
-    for s in starts:
-        g = rng.uniform(-extent, extent, 2)
+    # Send the first ``n_shared`` pedestrians to the shared goal. They are drawn
+    # in start order, which is itself random, so this is an unbiased subset.
+    n_shared = int(round(goal_share * len(starts))) if shared_goal is not None else 0
+    shared = np.asarray(shared_goal, dtype=float) if shared_goal is not None else None
+    for i, s in enumerate(starts):
+        if i < n_shared:
+            g = shared + rng.uniform(-0.6, 0.6, 2)   # cluster, not a single point
+        else:
+            g = rng.uniform(-extent, extent, 2)
         crowd.add(position=s.tolist(), goal=g.tolist(), on_arrival="reverse")
     return crowd
 
@@ -110,6 +145,17 @@ REGISTRY = {
     "circle": circle,
     "corridor": corridor,
     "random": random_crowd,
+}
+
+# audience-friendly labels for slides/plots (the registry keys stay stable so
+# the sweeps and CLI keep working).
+DISPLAY_NAMES = {
+    "empty": "Empty",
+    "head_on": "Head-on",
+    "crossing": "Crossing",
+    "circle": "Circle",
+    "corridor": "HBF Platform",
+    "random": "Marienplatz",
 }
 
 

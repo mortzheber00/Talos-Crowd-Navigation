@@ -50,10 +50,10 @@ SEEDS = list(range(10))
 # in walking.py, which is the interactive demo's configuration.
 
 def _base(**kw):
-    cfg = dict(scenario="random", n_peds=8, pedestrian_sensor_data=False,
+    cfg = dict(scenario="random", n_peds=10, pedestrian_sensor_data=False,
                robot_responsibility=0.2, ped_responsibility=0.3,
                safety_margin=0.2, crowd_avoids_robot=True, crowd_extent=5.0,
-               walk_duration=45.0, render=False)
+               goal_share=0.4, walk_duration=45.0, render=False)
     cfg.update(kw)
     return cfg
 
@@ -113,8 +113,11 @@ def qf_perception():
     comparison is within-pair and the crowd layout variance cancels.
     """
     runs = []
+    # all six scenarios, so slide 3 shows a GT-vs-perception bar pair for every
+    # scene shown on slide 2 ('empty' is the no-crowd control: the two bars must
+    # coincide, which is the sanity check that the pairing is right).
     for sensor in (False, True):
-        for scen in ("head_on", "crossing", "random"):
+        for scen in ("empty", "head_on", "crossing", "corridor", "circle", "random"):
             for seed in SEEDS:
                 runs.append(_base(scenario=scen, seed=seed,
                                   pedestrian_sensor_data=sensor,

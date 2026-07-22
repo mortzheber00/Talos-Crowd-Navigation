@@ -331,8 +331,12 @@ def qg_cooperation():
 # dominates: it is the only scenario whose *layout* changes with the seed (the
 # scripted ones have a fixed geometry, so extra seeds there only resample the
 # pref-velocity noise). Each seed is run under both sensors -> x2.
-DECK_SEEDS = {"random": 300, "crossing": 60, "corridor": 60,
-              "circle": 50, "head_on": 15, "empty": 15}
+# random is the only scenario whose LAYOUT is seeded, so it carries the seed
+# budget; the scripted scenarios have a fixed geometry (a new seed only re-rolls
+# the pref-velocity noise, ~identical runs) and empty is bit-identical across
+# seeds -- so they get just enough to draw an honest bar.
+DECK_SEEDS = {"random": 300, "crossing": 20, "corridor": 20,
+              "circle": 20, "head_on": 10, "empty": 5}
 DECK_NPEDS = {"random": 10, "crossing": 6, "corridor": 6,
               "circle": 8, "head_on": 2, "empty": 0}
 

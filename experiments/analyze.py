@@ -395,6 +395,18 @@ def qb2():
 
 SCEN_ORDER = ["empty", "head_on", "crossing", "corridor", "circle", "random"]
 
+# audience-friendly labels for slides/plots (kept in step with
+# orca_nav.scenarios.DISPLAY_NAMES; duplicated here so analyze.py does not have
+# to import the ROS package on the host).
+DISPLAY_NAMES = {"empty": "Empty", "head_on": "Head-on", "crossing": "Crossing",
+                 "corridor": "HBF Platform", "circle": "Circle",
+                 "random": "Marienplatz"}
+
+
+def _disp(scens):
+    """Map scenario keys to their slide labels."""
+    return [DISPLAY_NAMES.get(s, s) for s in scens]
+
 
 def qc():
     df = _load("qc_scenarios")
@@ -414,7 +426,7 @@ def qc():
     # 'empty' is the control, so it is drawn in a different slot than the
     # crowd scenarios rather than reading as just another condition
     colors = [C[6] if s == "empty" else C[0] for s in scens]
-    _bar_ci(axs[0], scens, rates, los, his, colors,
+    _bar_ci(axs[0], _disp(scens), rates, los, his, colors,
             "collision-free success", counts=counts)
     axs[0].axhline(0.8, color=BAD, ls="--", lw=1.4, zorder=4)
     axs[0].text(-0.45, 0.815, "project bar: 80%", ha="left", va="bottom",
@@ -425,7 +437,7 @@ def qc():
     ax = axs[1]
     data = [g.get_group(s)["min_sep_m"].dropna().values for s in scens]
     keep = [(s, d, c) for s, d, c in zip(scens, data, colors) if len(d)]
-    bp = ax.boxplot([d for _, d, _ in keep], labels=[s for s, _, _ in keep],
+    bp = ax.boxplot([d for _, d, _ in keep], labels=_disp([s for s, _, _ in keep]),
                     widths=0.55, patch_artist=True,
                     medianprops=dict(color=INK, lw=2))
     for patch, (_, _, c) in zip(bp["boxes"], keep):
@@ -441,7 +453,7 @@ def qc():
     ax = axs[2]
     data = [g.get_group(s)["path_ratio"].dropna().values for s in scens]
     keep = [(s, d, c) for s, d, c in zip(scens, data, colors) if len(d)]
-    bp = ax.boxplot([d for _, d, _ in keep], labels=[s for s, _, _ in keep],
+    bp = ax.boxplot([d for _, d, _ in keep], labels=_disp([s for s, _, _ in keep]),
                     widths=0.55, patch_artist=True,
                     medianprops=dict(color=INK, lw=2))
     for patch, (_, _, c) in zip(bp["boxes"], keep):
@@ -504,7 +516,7 @@ def qc_traj():
                     label="start", zorder=4)
         ax.plot(d["GOAL"][0], d["GOAL"][1], "*", ms=15, color=BAD,
                 label="goal", zorder=4)
-        ax.set_title(scen, loc="left")
+        ax.set_title(DISPLAY_NAMES.get(scen, scen), loc="left")
         ax.set_aspect("equal", adjustable="datalim")
         ax.grid(True)
         ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
@@ -698,7 +710,7 @@ def qf():
         for xi, r in zip(pos, rates):
             ax.text(xi, r + 0.03, f"{100 * r:.0f}", ha="center", fontsize=8,
                     color=INK)
-    ax.set_xticks(x); ax.set_xticklabels(scens)
+    ax.set_xticks(x); ax.set_xticklabels(_disp(scens))
     ax.set_ylim(0, 1.15)
     ax.set_yticks([0, 0.5, 1.0]); ax.set_yticklabels(["0", "50%", "100%"])
     ax.set_ylabel("collision-free success")
@@ -721,7 +733,7 @@ def qf():
             color=C[3], zorder=3, label="depth camera")
     ax.axhline(0, color=BAD, ls="--", lw=1.2)
     ax.set_xlim(-0.35, 1.35)
-    ax.set_xticks([0, 1]); ax.set_xticklabels(modes)
+    ax.set_xticks([0, 1]); ax.set_xticklabels(modes)  # GT vs camera, not scenarios
     ax.set_ylabel("min. clearance [m]")
     d = (piv["depth camera"] - piv["ground truth"])
     ax.set_title(f"Paired by scenario+seed\nmedian change "
@@ -751,7 +763,7 @@ def qf():
         ax.axhline(0.3, color=INK2, ls="--", lw=1.4)
         ax.text(-0.45, 0.45, "true pedestrian radius 0.30 m", ha="left",
                 fontsize=9, color=INK2)
-    ax.set_xticks(range(len(scens))); ax.set_xticklabels(scens)
+    ax.set_xticks(range(len(scens))); ax.set_xticklabels(_disp(scens))
     ax.set_ylabel("perceived radius [m]")
     ax.set_title("Why: it sees everyone, 10–30× too big", loc="left")
     ax.grid(axis="y", zorder=0)
@@ -781,6 +793,50 @@ def qf():
                   f"W={stat:.1f}, p={p:.4f}  (n={len(piv)} pairs)")
     except Exception as e:
         print(f"  (wilcoxon skipped: {e})")
+
+
+def qf_bars():
+    """Slide 3, standalone: collision-free success per scenario, ground truth
+    vs depth camera, as a clean grouped bar chart with the raw n/N under every
+    bar. This is the one figure the collision-results slide shows; the three-
+    panel qf() is the backup detail."""
+    df = _load("qf_perception")
+    if df is None:
+        return
+    df["mode"] = np.where(df["sensor"], "depth camera", "ground truth")
+    scens = [s for s in SCEN_ORDER if s in set(df["scenario"])]
+    modes = ["ground truth", "depth camera"]
+    colors = {"ground truth": C[0], "depth camera": C[3]}
+
+    fig, ax = plt.subplots(figsize=(11, 5.2))
+    x = np.arange(len(scens))
+    w = 0.38
+    for i, mode in enumerate(modes):
+        rates, elo, ehi, counts = [], [], [], []
+        for s in scens:
+            col = df[(df.scenario == s) & (df["mode"] == mode)]["success_collision_free"]
+            p, lo, hi = _rate(col)
+            rates.append(p); elo.append(p - lo); ehi.append(hi - p)
+            counts.append((int(col.sum()), int(col.size)))
+        pos = x + (i - 0.5) * w
+        ax.bar(pos, rates, width=w * 0.92, color=colors[mode], label=mode, zorder=2)
+        ax.errorbar(pos, rates, yerr=[elo, ehi], fmt="none", ecolor=INK2,
+                    elinewidth=1.2, capsize=4, zorder=3)
+        for xi, r, (k, n) in zip(pos, rates, counts):
+            ax.text(xi, r + 0.02, f"{100 * r:.0f}%\n{k}/{n}", ha="center",
+                    va="bottom", fontsize=9.5, color=INK, linespacing=1.25)
+    ax.set_xticks(x); ax.set_xticklabels(_disp(scens), fontsize=11)
+    ax.set_ylim(0, 1.18)
+    ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+    ax.set_yticklabels(["0", "25%", "50%", "75%", "100%"])
+    ax.set_ylabel("collision-free success  (Wilson 95% CI)")
+    ax.set_title("Collision-free arrivals per scenario: ground truth vs onboard depth camera",
+                 loc="left", fontweight="bold")
+    ax.grid(axis="y", zorder=0)
+    ax.legend(fontsize=11, ncol=2, loc="lower center", bbox_to_anchor=(0.5, 1.02),
+              frameon=False)
+    fig.tight_layout()
+    _save(fig, "slide3_collisions")
 
 
 # ---------------------------------------------------------------------------
@@ -1112,7 +1168,7 @@ def qhh():
 
 
 ALL = dict(qa=qa, qb=qb, qb2=qb2, qc=qc, qc_traj=qc_traj, qd=qd, qe=qe, qf=qf,
-           qg=qg, qg2=qg2, qh=qh, qhh=qhh)
+           qf_bars=qf_bars, qg=qg, qg2=qg2, qh=qh, qhh=qhh)
 
 
 def main():

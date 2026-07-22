@@ -34,8 +34,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 SCEN_ORDER = ["empty", "head_on", "crossing", "corridor", "circle", "random"]
 SCEN_TITLE = {"empty": "Empty (control)", "head_on": "Head-on",
-              "crossing": "Crossing", "corridor": "Corridor",
-              "circle": "Circle", "random": "Random crowd"}
+              "crossing": "Crossing", "corridor": "HBF Platform",
+              "circle": "Circle", "random": "Marienplatz"}
 
 # A vivid mid-green rather than a dark one: the GIF's 256-colour palette
 # quantises a dark saturated fill toward its own edge and the robot reads as a

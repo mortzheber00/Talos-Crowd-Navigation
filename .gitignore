@@ -35,3 +35,6 @@ MUJOCO_LOG.TXT
 experiments/results/
 experiments/figures/*
 !experiments/figures/gifs/
+
+# stale pre-merge sweep outputs (kept aside for comparison, not tracked)
+experiments/results.premerge/

@@ -29,3 +29,4 @@ MUJOCO_LOG.TXT
 
 # mac os bullshit 
 *.DS_Store
+CLAUDE.md CROWD_NAVIGATION_DESIGN.md

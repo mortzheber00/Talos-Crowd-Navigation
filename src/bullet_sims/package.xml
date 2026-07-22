@@ -7,7 +7,6 @@
   <maintainer email="nicolas.guenther@tum.de">devel</maintainer>
   <license>TODO: License declaration</license>
 
-  <depend>reemc_description</depend>
   <depend>talos_description</depend>
   <depend>rclpy</depend>
   <depend>launch</depend>

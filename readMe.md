@@ -139,7 +139,7 @@ RViz / CLI ┴───────────► /goal_pose ──► (both: O
 ```
 
 The ORCA node (`src/orca_nav/orca_nav/orca_node.py`) recomputes and publishes
-`cmd_vel` on every incoming `odom` message (~30 Hz — plenty, since the
+`cmd_vel` on every incoming `odom` message (~60 Hz — plenty, since the
 reactive footstep planner only samples the command once per ~0.8 s step, as
 an average over the step). It also runs standalone:
 `ros2 run orca_nav orca_planner` with `-p goal_x/goal_y/obstacle_topic/...`.

@@ -19,10 +19,10 @@ for png in "$FIGS"/*.png; do
 done
 echo "   $(ls "$WEBP"/*.webp 2>/dev/null | wc -l) webp"
 
-echo "== 3. ensembles =="
-python3 experiments/make_ensemble.py --sensor gt --poster \
+echo "== 3. ensembles (from deck_scenarios only) =="
+python3 experiments/make_ensemble.py --dirs deck_scenarios --sensor gt --poster \
   --out "$FIGS/gifs/ensemble_all.gif"
-python3 experiments/make_ensemble.py --sensor perception --poster \
+python3 experiments/make_ensemble.py --dirs deck_scenarios --sensor perception --poster \
   --out "$FIGS/gifs/ensemble_perception.gif"
 
 echo "== 4. nav gifs =="

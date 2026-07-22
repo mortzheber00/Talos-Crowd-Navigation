@@ -23,6 +23,8 @@ source /opt/ros/jazzy/setup.bash
 cd /workspaces/talos_crowd_navigation/.claude/worktrees/evaluation
 source install/setup.bash
 
+# random n=16 seed=4 rr=0.2 pr=0.3  n_coll=12 min_sep=-0.5953166300710155
+
 echo "[watch] n_peds=${NPEDS} seed=${SEED} robot_resp=${RROBOT} ped_resp=${RPED}"
 ros2 run bullet_sims walking --ros-args \
   -p render:=true -p early_stop:=false \

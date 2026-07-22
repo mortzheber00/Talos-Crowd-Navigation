@@ -327,7 +327,58 @@ def qg_cooperation():
     return runs
 
 
+# Per-scenario seed budget for the deck's scenario comparison (Block 1). Random
+# dominates: it is the only scenario whose *layout* changes with the seed (the
+# scripted ones have a fixed geometry, so extra seeds there only resample the
+# pref-velocity noise). Each seed is run under both sensors -> x2.
+DECK_SEEDS = {"random": 300, "crossing": 60, "corridor": 60,
+              "circle": 50, "head_on": 15, "empty": 15}
+DECK_NPEDS = {"random": 10, "crossing": 6, "corridor": 6,
+              "circle": 8, "head_on": 2, "empty": 0}
+
+
+def deck_scenarios():
+    """Block 1: the scenario comparison behind slides 1 (ensemble) and 3 (bars).
+
+    Every scenario under ground truth AND the onboard depth camera, paired by
+    seed. 500 GT + 500 perception = 1000 runs.
+    """
+    runs = []
+    for scen, nseed in DECK_SEEDS.items():
+        for sensor in (False, True):
+            for seed in range(nseed):
+                runs.append(_base(scenario=scen, n_peds=DECK_NPEDS[scen],
+                                  seed=seed, pedestrian_sensor_data=sensor,
+                                  run_id=f"ds_{scen}_{'perc' if sensor else 'gt'}_s{seed}"))
+    return runs
+
+
+def qh_zoom():
+    """Slide 4: the failure boundary, zoomed into the low-cooperation corner.
+
+    Q-H/Q-G showed everything is 100% collision-free once each side takes even
+    0.1-0.2 of the avoidance, so the whole gradient is squeezed into [0, 0.2].
+    This zooms both axes there at 0.04 resolution to locate the breaking point
+    precisely, on the hardened random crowd at a plausible density (24, not the
+    discarded 48). Ground truth only (safety metric). Success = collision-free.
+
+    6 x 6 x 10 seeds = 360 runs.
+    """
+    runs = []
+    grid = (0.0, 0.04, 0.08, 0.12, 0.16, 0.20)
+    for rr in grid:
+        for pr in grid:
+            for seed in SEEDS:
+                runs.append(_base(scenario="random", n_peds=24, crowd_extent=5.0,
+                                  seed=seed, robot_responsibility=rr,
+                                  ped_responsibility=pr,
+                                  run_id=f"qz_r{rr}_p{pr}_s{seed}"))
+    return runs
+
+
 EXPERIMENTS = {
+    "deck_scenarios": deck_scenarios,
+    "qh_zoom": qh_zoom,
     "qab_timing": qab_timing,
     "qa_solo": qa_solo,
     "qb2_speed": qb2_speed,

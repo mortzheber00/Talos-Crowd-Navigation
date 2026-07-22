@@ -154,8 +154,8 @@ DISPLAY_NAMES = {
     "head_on": "Head-on",
     "crossing": "Crossing",
     "circle": "Circle",
-    "corridor": "HBF Platform",
-    "random": "Marienplatz",
+    "corridor": "Corridor",
+    "random": "Random",
 }
 
 

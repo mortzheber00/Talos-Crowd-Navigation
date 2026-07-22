@@ -34,8 +34,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 SCEN_ORDER = ["empty", "head_on", "crossing", "corridor", "circle", "random"]
 SCEN_TITLE = {"empty": "Empty (control)", "head_on": "Head-on",
-              "crossing": "Crossing", "corridor": "HBF Platform",
-              "circle": "Circle", "random": "Marienplatz"}
+              "crossing": "Crossing", "corridor": "Corridor",
+              "circle": "Circle", "random": "Random"}
 
 # A vivid mid-green rather than a dark one: the GIF's 256-colour palette
 # quantises a dark saturated fill toward its own edge and the robot reads as a
@@ -101,6 +101,13 @@ def _sample_indices(t_series, t_grid):
     idx = np.searchsorted(tv, t_grid, side="right") - 1
     idx = np.clip(idx, 0, len(valid) - 1)
     return valid[idx]
+
+
+# Fixed axis box shared by every scenario GIF, so the six clips read at the same
+# scale side by side on the slide (a per-scenario auto-fit made an empty hall and
+# a packed square look the same size). The robot walks origin -> (4, 0).
+FIXED_XLIM = (-5.0, 5.0)
+FIXED_YLIM = (-4.0, 4.0)
 
 
 def _extent(d, pad=0.6):
@@ -181,9 +188,9 @@ def _update(A, d, ridx, t_grid, frame):
 
 
 def make_single(scen, d, t_grid, fps, out_dir):
-    fig, ax = plt.subplots(figsize=(5.2, 5.2))
-    xlim = _extent(d)[:2]; ylim = _extent(d)[2:]
-    _draw_static(ax, d, xlim, ylim, SCEN_TITLE.get(scen, scen))
+    # figure aspect matches the fixed 10x8 m box so it fills without letterboxing
+    fig, ax = plt.subplots(figsize=(5.8, 4.9))
+    _draw_static(ax, d, FIXED_XLIM, FIXED_YLIM, SCEN_TITLE.get(scen, scen))
     ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
     n_peds = _n_peds(d)
     A = _make_artists(ax, n_peds, d["PED_RADII"])
@@ -211,8 +218,7 @@ def make_grid(runs, t_grid, fps, out_dir):
     per = []
     for ax, scen in zip(axs, scens):
         d = runs[scen]
-        xlim = _extent(d)[:2]; ylim = _extent(d)[2:]
-        _draw_static(ax, d, xlim, ylim, SCEN_TITLE.get(scen, scen))
+        _draw_static(ax, d, FIXED_XLIM, FIXED_YLIM, SCEN_TITLE.get(scen, scen))
         n_peds = _n_peds(d)
         A = _make_artists(ax, n_peds, d["PED_RADII"])
         per.append((d, A, _sample_indices(d["TIME"], t_grid)))

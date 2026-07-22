@@ -399,8 +399,8 @@ SCEN_ORDER = ["empty", "head_on", "crossing", "corridor", "circle", "random"]
 # orca_nav.scenarios.DISPLAY_NAMES; duplicated here so analyze.py does not have
 # to import the ROS package on the host).
 DISPLAY_NAMES = {"empty": "Empty", "head_on": "Head-on", "crossing": "Crossing",
-                 "corridor": "HBF Platform", "circle": "Circle",
-                 "random": "Marienplatz"}
+                 "corridor": "Corridor", "circle": "Circle",
+                 "random": "Random"}
 
 
 def _disp(scens):
@@ -800,7 +800,7 @@ def qf_bars():
     vs depth camera, as a clean grouped bar chart with the raw n/N under every
     bar. This is the one figure the collision-results slide shows; the three-
     panel qf() is the backup detail."""
-    df = _load("qf_perception")
+    df = _load("deck_scenarios")
     if df is None:
         return
     df["mode"] = np.where(df["sensor"], "depth camera", "ground truth")
@@ -832,6 +832,9 @@ def qf_bars():
     ax.set_ylabel("collision-free success  (Wilson 95% CI)")
     ax.set_title("Collision-free arrivals per scenario: ground truth vs onboard depth camera",
                  loc="left", fontweight="bold")
+    ax.axhline(0.8, color=BAD, ls="--", lw=1.4, zorder=4)
+    ax.text(-0.45, 0.815, "project bar: 80%", ha="left", va="bottom",
+            fontsize=9, color=BAD, zorder=5)
     ax.grid(axis="y", zorder=0)
     ax.legend(fontsize=11, ncol=2, loc="lower center", bbox_to_anchor=(0.5, 1.02),
               frameon=False)
@@ -1007,6 +1010,75 @@ def qg2():
     print(t.to_string())
 
 
+def qh_zoom():
+    """Slide 4: the failure boundary, zoomed into the low-cooperation corner.
+
+    robot_responsibility x ped_responsibility, both {0..0.20} at 0.04, on the
+    random crowd at n=24 (ground truth). Three heatmaps tell the decoupling
+    story: collisions concentrate in the low-crowd-share COLUMN (safety follows
+    the crowd), timeouts in the low-robot-share ROW (liveness follows the robot).
+    """
+    df = _load("qh_zoom")
+    if df is None:
+        return
+    rrs = sorted(df["robot_responsibility"].unique())      # rows (y)
+    prs = sorted(df["ped_responsibility"].unique())        # cols (x)
+
+    def grid(fn):
+        M = np.full((len(rrs), len(prs)), np.nan)
+        for i, rr in enumerate(rrs):
+            for j, pr in enumerate(prs):
+                sel = df[(np.isclose(df.robot_responsibility, rr)) &
+                         (np.isclose(df.ped_responsibility, pr))]
+                if len(sel):
+                    M[i, j] = fn(sel)
+        return M
+
+    CF = grid(lambda s: s["success_collision_free"].mean())
+    COL = grid(lambda s: s["collided"].mean())
+    TO = grid(lambda s: 1.0 - s["reached_goal"].mean())
+
+    panels = [
+        (CF, "Greens", 0, 1, "Collision-free success", "rate", lambda v: v > 0.55),
+        (COL, "Reds", 0, 1, "Collisions  (safety follows the crowd →)", "rate",
+         lambda v: v > 0.55),
+        (TO, "Oranges", 0, 1, "Timeouts  (liveness follows the robot ↑)", "rate",
+         lambda v: v > 0.55),
+    ]
+    fig, axs = plt.subplots(1, 3, figsize=(16, 5.0))
+    lab = [f"{v:.2f}" for v in prs]
+    for ax, (M, cmap, vmin, vmax, title, cbl, whitetext) in zip(axs, panels):
+        im = ax.imshow(M, cmap=cmap, vmin=vmin, vmax=vmax, origin="lower",
+                       aspect="auto")
+        ax.set_xticks(range(len(prs))); ax.set_xticklabels(lab, fontsize=9)
+        ax.set_yticks(range(len(rrs))); ax.set_yticklabels([f"{v:.2f}" for v in rrs],
+                                                           fontsize=9)
+        ax.set_xlabel("pedestrian responsibility  (crowd yields →)")
+        ax.set_ylabel("robot responsibility")
+        for i in range(len(rrs)):
+            for j in range(len(prs)):
+                if np.isfinite(M[i, j]):
+                    ax.text(j, i, f"{100 * M[i, j]:.0f}", ha="center", va="center",
+                            fontsize=8.5,
+                            color="#fff" if whitetext(M[i, j]) else INK)
+        ax.set_title(title, loc="left", fontsize=12)
+        fig.colorbar(im, ax=ax, fraction=0.046, label=cbl)
+
+    fig.suptitle("Slide 4  Where it fails: robot's share × crowd's share "
+                 "(random, 24 peds, ground truth)", x=0.02, ha="left",
+                 fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    _save(fig, "slide4_failure_boundary")
+
+    t = df.groupby(["robot_responsibility", "ped_responsibility"]).agg(
+        n=("success", "size"), collided=("collided", "mean"),
+        collision_free=("success_collision_free", "mean"),
+        reached=("reached_goal", "mean"),
+        min_sep=("min_sep_m", "median"), t_goal=("t_goal_s", "median")).round(3)
+    t.to_csv(os.path.join(RESULTS, "table_slide4_failure_boundary.csv"))
+    print(t.to_string())
+
+
 def qh():
     """Q-H: the reciprocity plane, robot share x crowd share."""
     df = _load("qh_reciprocity")
@@ -1168,7 +1240,7 @@ def qhh():
 
 
 ALL = dict(qa=qa, qb=qb, qb2=qb2, qc=qc, qc_traj=qc_traj, qd=qd, qe=qe, qf=qf,
-           qf_bars=qf_bars, qg=qg, qg2=qg2, qh=qh, qhh=qhh)
+           qf_bars=qf_bars, qh_zoom=qh_zoom, qg=qg, qg2=qg2, qh=qh, qhh=qhh)
 
 
 def main():

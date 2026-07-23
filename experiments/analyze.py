@@ -1035,18 +1035,18 @@ def qh_zoom():
                     M[i, j] = fn(sel)
         return M
 
-    CF = grid(lambda s: s["success_collision_free"].mean())
     COL = grid(lambda s: s["collided"].mean())
     TO = grid(lambda s: 1.0 - s["reached_goal"].mean())
 
+    # Two clean, non-overlapping questions: did it hit anyone, and did it arrive?
+    # (collision-free success conflated the two and is dropped.)
     panels = [
-        (CF, "Greens", 0, 1, "Collision-free success", "rate", lambda v: v > 0.55),
-        (COL, "Reds", 0, 1, "Collisions  (safety follows the crowd →)", "rate",
-         lambda v: v > 0.55),
-        (TO, "Oranges", 0, 1, "Timeouts  (liveness follows the robot ↑)", "rate",
-         lambda v: v > 0.55),
+        (COL, "Reds", 0, 1, "Collisions  —  only when the crowd yields nothing",
+         "collision rate", lambda v: v > 0.55),
+        (TO, "Oranges", 0, 1, "Timeouts  —  worst when the robot stays passive",
+         "timeout rate", lambda v: v > 0.55),
     ]
-    fig, axs = plt.subplots(1, 3, figsize=(16, 5.0))
+    fig, axs = plt.subplots(1, 2, figsize=(12.5, 5.2))
     lab = [f"{v:.2f}" for v in prs]
     for ax, (M, cmap, vmin, vmax, title, cbl, whitetext) in zip(axs, panels):
         im = ax.imshow(M, cmap=cmap, vmin=vmin, vmax=vmax, origin="lower",
@@ -1065,10 +1065,10 @@ def qh_zoom():
         ax.set_title(title, loc="left", fontsize=12)
         fig.colorbar(im, ax=ax, fraction=0.046, label=cbl)
 
-    fig.suptitle("Slide 4  Where it fails: robot's share × crowd's share "
-                 "(random, 24 peds, ground truth)", x=0.02, ha="left",
-                 fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.suptitle("Safety follows the crowd (left column) · liveness follows the "
+                 "robot (bottom row)   —   random, 24 peds, ground truth",
+                 x=0.02, ha="left", fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     _save(fig, "slide4_failure_boundary")
 
     t = df.groupby(["robot_responsibility", "ped_responsibility"]).agg(

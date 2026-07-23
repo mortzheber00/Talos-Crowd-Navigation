@@ -97,17 +97,25 @@ SLIDES = [
  dict(arc="failure", qid="Where it fails",
       head="It fails when the crowd stops yielding — not when the robot does",
       sub="Robot's avoidance share × crowd's share, zoomed into the low-cooperation corner (Random, 24 peds)",
-      body="""<p>The nominal crowd is collision-free because <em>both</em> sides give way. To find the edge we
-      shrink each side's ORCA share toward zero and watch where safety breaks. Everything is already
-      collision-free once each side takes even ~0.1, so the whole gradient lives in
-      <code>[0,&nbsp;0.20]</code> — this sweep zooms there at 0.04 resolution.</p>
-      <p><strong>The failure is a column, not a diagonal.</strong> Collisions appear only as the
-      <em>crowd's</em> share &rarr; 0, and the robot's own share barely moves that line: a fully-committed
-      robot is still out-run by a crowd that refuses to yield. <strong>Safety follows the crowd; the robot's
-      share buys liveness (time-to-goal), not clearance.</strong></p>
-      <p class="note">This is the bridge from slide&nbsp;3: the 100&nbsp;%s there are not the robot solving a
-      hard problem alone — they hold because the crowd cooperates. Take that away and the safety margin goes
-      with it.</p>""",
+      body="""<p>Slide&nbsp;3 had <em>zero</em> collisions — because the crowd always yielded. So we
+      <strong>replayed the Random crowd with the cooperation turned down</strong> (robot and crowd ORCA
+      shares swept from 0 to 0.20). Now collisions appear: overlaying all 360 runs, <b class="num bad">46</b>
+      end in a collision (red) where the baseline had none.</p>
+      <p>The heatmap says exactly <em>when</em>. Everything is collision-free once each side takes even ~0.1,
+      so we zoom into <code>[0,&nbsp;0.20]</code> at 0.04 resolution:</p>
+      <ul>
+      <li><strong>Collisions are a single column</strong> — they happen <em>only</em> when the crowd yields
+      nothing (<code>ped&nbsp;=&nbsp;0</code>), whatever the robot does. A fully-committed robot is still
+      out-run by a non-yielding crowd. <strong>Safety is the crowd's job.</strong></li>
+      <li><strong>Timeouts are a row</strong> — worst when the robot is passive (<code>robot&nbsp;=&nbsp;0</code>),
+      easing as it commits. <strong>Liveness is the robot's job.</strong></li>
+      </ul>
+      <p class="note">The bridge from slide&nbsp;3: those 100&nbsp;% safety bars are not the robot solving a
+      hard problem alone — they hold because the crowd cooperates. Remove that, and only then does the robot
+      hit anyone.</p>""",
+      ensembles=[("ensemble_block2.gif",
+                  "Random replayed at low responsibility — 360 runs overlaid; "
+                  "46 now end in a collision (red)")],
       fig="slide4_failure_boundary", ensemble=False, gifs=False, fig2=None,
       take=None),
 ]

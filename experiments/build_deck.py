@@ -41,9 +41,10 @@ SLIDES = [
       body="""<div class="split">
       <div><h4>What we ran</h4><ul>
       <li>Six repeatable crowd scenarios, robot walking origin&nbsp;&rarr;&nbsp;(4,&nbsp;0)&nbsp;m.</li>
-      <li><b class="num">173</b> runs behind slides&nbsp;1&amp;&nbsp;3: every scenario under
-      <strong>ground truth</strong> and the <strong>onboard depth camera</strong>, 10 seeds each.</li>
-      <li>A <b class="num">180</b>-run responsibility sweep behind slide&nbsp;4 (the failure boundary).</li>
+      <li><b class="num">750</b> runs behind slides&nbsp;1&amp;&nbsp;3: every scenario under
+      <strong>ground truth</strong> and the <strong>onboard depth camera</strong> (375 each),
+      random-heavy since it is the only scenario whose layout the seed changes.</li>
+      <li>A <b class="num">360</b>-run responsibility sweep behind slide&nbsp;4 (the failure boundary).</li>
       <li>Headless, 10 runs at once; each with its own <code>ROS_DOMAIN_ID</code> — without it,
       parallel runs share a DDS domain and one run's ORCA steers on another's odometry.</li>
       <li>Wilson 95&nbsp;% intervals for rates; Wilcoxon signed-rank for paired tests.</li></ul></div>
@@ -58,9 +59,9 @@ SLIDES = [
       <strong>onboard perception</strong> on top, <strong>ground truth</strong> below. Same crowds, two
       sensing conditions, the whole evaluation in two frames:</p>""",
       ensembles=[("ensemble_perception.gif",
-                  "Onboard depth camera — 500 runs overlaid"),
+                  "Onboard depth camera — 375 runs overlaid"),
                  ("ensemble_all.gif",
-                  "Ground truth — 500 runs overlaid")],
+                  "Ground truth — 375 runs overlaid")],
       ensemble=False, fig=None, fig2=None, take=None, gifs=False),
 
  dict(arc="scenarios", qid="The scenarios",
@@ -80,17 +81,18 @@ SLIDES = [
 
  dict(arc="results", qid="Collision results",
       head="Collision-free almost everywhere — perception included",
-      sub="Collision-free arrivals per scenario: ground truth vs. the onboard depth camera, 10 seeds each",
-      body="""<p>Above the <strong>80&nbsp;% project bar</strong> in every scenario, on both sensors. The two
-      hard cases are the contested-goal <strong>Random</strong> square (80&nbsp;% ground truth, 70&nbsp;%
-      perception) and, mildly, <strong>Corridor</strong> and <strong>Circle</strong> on the camera.</p>
-      <p><strong>Onboard perception now tracks ground truth.</strong> After the per-camera fusion fix, the
-      depth camera lands within one or two runs of ground truth everywhere, and minimum clearance is
-      statistically unchanged between the two (Wilcoxon <b class="num">p = 0.06</b> over 50 pairs) — the
-      earlier collapse, where an inflated radius estimate made the robot flee phantom obstacles, is gone.</p>""",
+      sub="Collision-free arrivals per scenario: ground truth vs. the onboard depth camera (raw counts under each bar)",
+      body="""<p><strong>On the scripted crowds it is essentially solved</strong> — 100&nbsp;% on ground
+      truth, and the onboard depth camera costs at most one run in twenty (Crossing/Corridor/Circle 95&nbsp;%).
+      The per-camera fusion fix did its job: no more fleeing phantom obstacles.</p>
+      <p><strong>The cost concentrates on the hard scenario.</strong> The contested-goal <strong>Random</strong>
+      square is where both the crowd and perception bite: <b class="num">89&nbsp;%</b> collision-free on ground
+      truth (266/300) drops to <b class="num bad">56&nbsp;%</b> with the depth camera (167/300) — a
+      33-point gap. A dense crowd converging on the goal is exactly where the camera's tracks merge and
+      mislead, so the one scenario that stresses the planner is also the one that stresses perception.</p>""",
       fig="slide3_collisions", ensemble=False, gifs=False, fig2=None,
-      take=("ok", "Nominal crowds are essentially solved. So the honest next question is not <em>does it "
-            "work</em> but <em>what has to break for it to fail</em> — which is the whole point of slide&nbsp;4.")),
+      take=("warn", "So it is not uniformly solved — the difficulty is all in the dense, contested crowd. "
+            "Slide&nbsp;4 opens that scenario up: <em>what</em>, exactly, makes it fail?")),
 
  dict(arc="failure", qid="Where it fails",
       head="It fails when the crowd stops yielding — not when the robot does",

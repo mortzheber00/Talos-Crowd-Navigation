@@ -81,18 +81,18 @@ SLIDES = [
 
  dict(arc="results", qid="Collision results",
       head="Collision-free almost everywhere — perception included",
-      sub="Collision-free arrivals per scenario: ground truth vs. the onboard depth camera (raw counts under each bar)",
-      body="""<p><strong>On the scripted crowds it is essentially solved</strong> — 100&nbsp;% on ground
-      truth, and the onboard depth camera costs at most one run in twenty (Crossing/Corridor/Circle 95&nbsp;%).
-      The per-camera fusion fix did its job: no more fleeing phantom obstacles.</p>
-      <p><strong>The cost concentrates on the hard scenario.</strong> The contested-goal <strong>Random</strong>
-      square is where both the crowd and perception bite: <b class="num">89&nbsp;%</b> collision-free on ground
-      truth (266/300) drops to <b class="num bad">56&nbsp;%</b> with the depth camera (167/300) — a
-      33-point gap. A dense crowd converging on the goal is exactly where the camera's tracks merge and
-      mislead, so the one scenario that stresses the planner is also the one that stresses perception.</p>""",
+      sub="Two questions per scenario, ground truth vs. the onboard depth camera: did it stay safe, and did it arrive in time?",
+      body="""<p><strong>Safety is solved.</strong> <b class="num">Zero collisions</b> across all 1&thinsp;500
+      scenario runs — every scenario, both sensors, 100&nbsp;% collision-free (left). At nominal cooperation
+      the crowd always yields, so the robot simply never hits anyone.</p>
+      <p><strong>The cost is liveness — reaching the goal in time (right).</strong> Trivial on the simple
+      crowds; the depth camera shaves at most a run in twenty. But on the contested-goal <strong>Random</strong>
+      square, arrivals within 45&nbsp;s drop from <b class="num">89&nbsp;%</b> on ground truth to
+      <b class="num bad">56&nbsp;%</b> with the camera — a dense crowd converging on the goal is where merged
+      camera tracks make the robot hesitate. The failure is a <em>time</em> cost, not a safety one.</p>""",
       fig="slide3_collisions", ensemble=False, gifs=False, fig2=None,
-      take=("warn", "So it is not uniformly solved — the difficulty is all in the dense, contested crowd. "
-            "Slide&nbsp;4 opens that scenario up: <em>what</em>, exactly, makes it fail?")),
+      take=("warn", "Safe everywhere, but slow in the dense contested crowd. Slide&nbsp;4 opens that scenario "
+            "up — and shows where safety <em>itself</em> finally breaks.")),
 
  dict(arc="failure", qid="Where it fails",
       head="It fails when the crowd stops yielding — not when the robot does",

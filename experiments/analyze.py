@@ -796,10 +796,10 @@ def qf():
 
 
 def qf_bars():
-    """Slide 3, standalone: collision-free success per scenario, ground truth
-    vs depth camera, as a clean grouped bar chart with the raw n/N under every
-    bar. This is the one figure the collision-results slide shows; the three-
-    panel qf() is the backup detail."""
+    """Slide 3: safety and liveness split into two panels, ground truth vs depth
+    camera, per scenario. Left = collision-free (safety, ~100% everywhere at
+    nominal cooperation); right = reached the goal within 45 s (liveness, where
+    the difficulty and perception's cost actually show up). Pure percentages."""
     df = _load("deck_scenarios")
     if df is None:
         return
@@ -807,38 +807,39 @@ def qf_bars():
     scens = [s for s in SCEN_ORDER if s in set(df["scenario"])]
     modes = ["ground truth", "depth camera"]
     colors = {"ground truth": C[0], "depth camera": C[3]}
-
-    fig, ax = plt.subplots(figsize=(11, 5.2))
     x = np.arange(len(scens))
     w = 0.38
-    for i, mode in enumerate(modes):
-        rates, elo, ehi, counts = [], [], [], []
-        for s in scens:
-            col = df[(df.scenario == s) & (df["mode"] == mode)]["success_collision_free"]
-            p, lo, hi = _rate(col)
-            rates.append(p); elo.append(p - lo); ehi.append(hi - p)
-            counts.append((int(col.sum()), int(col.size)))
-        pos = x + (i - 0.5) * w
-        ax.bar(pos, rates, width=w * 0.92, color=colors[mode], label=mode, zorder=2)
-        ax.errorbar(pos, rates, yerr=[elo, ehi], fmt="none", ecolor=INK2,
-                    elinewidth=1.2, capsize=4, zorder=3)
-        for xi, r, (k, n) in zip(pos, rates, counts):
-            ax.text(xi, r + 0.02, f"{100 * r:.0f}%\n{k}/{n}", ha="center",
-                    va="bottom", fontsize=9.5, color=INK, linespacing=1.25)
-    ax.set_xticks(x); ax.set_xticklabels(_disp(scens), fontsize=11)
-    ax.set_ylim(0, 1.18)
-    ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
-    ax.set_yticklabels(["0", "25%", "50%", "75%", "100%"])
-    ax.set_ylabel("collision-free success  (Wilson 95% CI)")
-    ax.set_title("Collision-free arrivals per scenario: ground truth vs onboard depth camera",
-                 loc="left", fontweight="bold")
-    ax.axhline(0.8, color=BAD, ls="--", lw=1.4, zorder=4)
-    ax.text(-0.45, 0.815, "project bar: 80%", ha="left", va="bottom",
-            fontsize=9, color=BAD, zorder=5)
-    ax.grid(axis="y", zorder=0)
-    ax.legend(fontsize=11, ncol=2, loc="lower center", bbox_to_anchor=(0.5, 1.02),
-              frameon=False)
-    fig.tight_layout()
+
+    def _panel(ax, metric, title):
+        for i, mode in enumerate(modes):
+            rates = []
+            for s in scens:
+                sel = df[(df.scenario == s) & (df["mode"] == mode)]
+                rates.append(float(metric(sel)) if len(sel) else np.nan)
+            pos = x + (i - 0.5) * w
+            ax.bar(pos, rates, width=w * 0.92, color=colors[mode], label=mode, zorder=2)
+            for xi, r in zip(pos, rates):
+                if np.isfinite(r):
+                    ax.text(xi, r + 0.02, f"{100 * r:.0f}%", ha="center",
+                            va="bottom", fontsize=10, color=INK)
+        ax.set_xticks(x); ax.set_xticklabels(_disp(scens), fontsize=10.5)
+        ax.set_ylim(0, 1.15)
+        ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+        ax.set_yticklabels(["0", "25%", "50%", "75%", "100%"])
+        ax.set_title(title, loc="left", fontweight="bold")
+        ax.grid(axis="y", zorder=0)
+
+    fig, axs = plt.subplots(1, 2, figsize=(15, 5.2))
+    _panel(axs[0], lambda s: 1.0 - s["collided"].mean(),
+           "Collision-free  (safety)")
+    _panel(axs[1], lambda s: s["reached_goal"].mean(),
+           "Reached the goal within 45 s  (liveness)")
+    axs[0].set_ylabel("share of runs")
+    axs[1].legend(fontsize=11, ncol=2, loc="lower center",
+                  bbox_to_anchor=(0.5, 1.03), frameon=False)
+    fig.suptitle("Per scenario, ground truth vs onboard depth camera",
+                 x=0.02, ha="left", fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     _save(fig, "slide3_collisions")
 
 
